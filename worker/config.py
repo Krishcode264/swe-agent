@@ -9,3 +9,13 @@ BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://localhost:4000/api")
 
 # Placeholder for future AI integration (e.g. OpenAI or Gemini)
 AI_API_KEY = os.getenv("AI_API_KEY", "")
+
+# Anthropic Claude API key (primary LLM for agent reasoning)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+# GitHub Personal Access Token (for PR creation)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
+# Target repository to fix (shopstack-platform by default)
+TARGET_REPO = os.getenv("TARGET_REPO", "Rezinix-AI/shopstack-platform")
+
