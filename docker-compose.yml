@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=development
+      - PORT=4000
+      - REDIS_URL=redis://redis:6379
+      - MONGO_URL=mongodb://mongodb:27017/incident_db
+    depends_on:
+      - redis
+      - mongodb
+    volumes:
+      - ./backend/src:/app/src
+
+  worker:
+    build: ./worker
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - QUEUE_NAME=incident_tasks
+      - BACKEND_API_URL=http://backend:4000/api
+    depends_on:
+      - redis
+      - backend
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:4000/api
+    depends_on:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  mongodb:
+    image: mongo:6
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+
+  dummy-backend:
+    build: ./dummy-app/backend
+    ports:
+      - "5000:5000"
+    environment:
+      - BACKEND_WEBHOOK_URL=http://backend:4000/webhook/github
+
+  dummy-frontend:
+    build: ./dummy-app/frontend
+    ports:
+      - "3001:80"
+
+volumes:
+  mongodb_data:

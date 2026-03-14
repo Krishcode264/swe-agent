@@ -1,0 +1,5 @@
+redis==4.6.0
+requests==2.31.0
+GitPython==3.1.32
+python-dotenv==1.0.0
+pytest==7.4.0
