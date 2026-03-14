@@ -22,6 +22,7 @@ function App() {
         setMessage(`Error: ${data.error} - ${data.detail}`);
       }
     } catch (error: any) {
+      console.log(" issue withy efcthcing ")
       setMessage(`Network error: ${error.message}`);
     }
   };
