@@ -31,7 +31,7 @@ from agent.tools import (
     search_in_directory,
 )
 from agent.prompts import REPORT_PROMPT
-from agent.fix_generator import _call_claude
+from agent.fix_generator import _call_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +241,7 @@ def _generate_report_markdown(report: ResolutionReport) -> str:
             retry_count=report.retry_count,
             files_analyzed=", ".join(report.files_analyzed),
         )
-        return _call_claude(prompt, max_tokens=4096)
+        return _call_gemini(prompt)
     except Exception as e:
         logger.error(f"Failed to generate report: {e}")
         return f"# Resolution Report — {report.incident_id}\n\nReport generation failed: {e}"

@@ -1,7 +1,6 @@
 """
-Fix generator — uses Claude LLM to analyze code and generate minimal fixes.
+Fix generator — uses Gemini LLM to analyze code and generate minimal fixes.
 
-Replaces the original placeholder that used time.sleep() and hardcoded responses.
 This module handles:
   1. Parsing incident tickets to extract structured context
   2. Analyzing relevant code files to identify root causes
@@ -12,9 +11,9 @@ import json
 import logging
 from typing import Optional
 
-import anthropic
+from google import genai
 
-from config import ANTHROPIC_API_KEY
+from config import GEMINI_API_KEY
 from shared.models import Fix
 from agent.prompts import (
     PARSE_TICKET_PROMPT,
@@ -25,60 +24,50 @@ from agent.prompts import (
 
 logger = logging.getLogger(__name__)
 
-# Initialize Anthropic client
-_client: Optional[anthropic.Anthropic] = None
+# Initialize Gemini client
+_client: Optional[genai.Client] = None
 
 
-def _get_client() -> anthropic.Anthropic:
-    """Lazy-initialize the Anthropic client."""
+def _get_client() -> genai.Client:
+    """Lazy-initialize the Gemini client."""
     global _client
     if _client is None:
-        if not ANTHROPIC_API_KEY:
+        if not GEMINI_API_KEY:
             raise ValueError(
-                "ANTHROPIC_API_KEY is not set. Add it to your .env file."
+                "GEMINI_API_KEY is not set. Add it to your .env file."
             )
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        _client = genai.Client(api_key=GEMINI_API_KEY)
     return _client
 
 
-def _call_claude(prompt: str, max_tokens: int = 4096) -> str:
+def _call_gemini(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
     """
-    Make a single Claude API call and return the text response.
+    Make a single Gemini API call and return the text response.
     Centralized here so all LLM calls go through one function.
+    Using gemini-2.5-flash by default as it is fast and has high rate limits.
     """
     client = _get_client()
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt
         )
-        return message.content[0].text
+        return response.text
     except Exception as e:
-        logger.error(f"Claude API call failed: {e}")
+        logger.error(f"Gemini API call failed: {e}")
         raise
 
 
 def parse_ticket(ticket_json: str) -> dict:
     """
     Parse an incident ticket JSON and extract structured information.
-
-    Args:
-        ticket_json: Raw JSON string of the incident ticket.
-
-    Returns:
-        Dictionary with extracted fields: incident_id, service, error_type,
-        error_message, affected_file, severity, hypothesis, etc.
     """
     prompt = PARSE_TICKET_PROMPT.format(ticket_json=ticket_json)
-    response = _call_claude(prompt, max_tokens=2048)
+    response = _call_gemini(prompt)
 
     try:
-        # Try to extract JSON from the response
-        # Handle cases where Claude wraps JSON in markdown code blocks
         cleaned = response.strip()
         if cleaned.startswith("```"):
-            # Remove markdown code block
             lines = cleaned.split("\n")
             cleaned = "\n".join(lines[1:-1])
         return json.loads(cleaned)
@@ -102,17 +91,6 @@ def analyze_code(
 ) -> str:
     """
     Analyze a code file in the context of an incident to identify the root cause.
-
-    Args:
-        incident_id: The incident ID (e.g., "INC-001").
-        service: The affected service name.
-        error_message: The error message or stack trace.
-        hypothesis: Current hypothesis about the root cause.
-        file_path: Path of the file being analyzed.
-        file_content: Full contents of the file.
-
-    Returns:
-        Claude's analysis as a string — root cause explanation.
     """
     prompt = ANALYZE_CODE_PROMPT.format(
         incident_id=incident_id,
@@ -122,7 +100,8 @@ def analyze_code(
         file_path=file_path,
         file_content=file_content,
     )
-    return _call_claude(prompt)
+    # Could use gemini-2.5-pro here, but sticking to flash for safety against rate limits
+    return _call_gemini(prompt, model_name="gemini-2.5-flash")
 
 
 def generate_fix(
@@ -133,15 +112,6 @@ def generate_fix(
 ) -> Fix:
     """
     Generate a minimal code fix for the identified root cause.
-
-    Args:
-        incident_id: The incident ID.
-        root_cause: Confirmed root cause description.
-        file_path: Path of the file to fix.
-        file_content: Current contents of the file.
-
-    Returns:
-        A Fix dataclass with the patch details.
     """
     prompt = GENERATE_FIX_PROMPT.format(
         incident_id=incident_id,
@@ -149,13 +119,18 @@ def generate_fix(
         file_path=file_path,
         file_content=file_content,
     )
-    response = _call_claude(prompt)
+    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
 
     try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
             cleaned = "\n".join(lines[1:-1])
+            
+        # Optional: strip language tags if any from the backticks
+        if cleaned.startswith("json\n"):
+            cleaned = cleaned[5:]
+
         fix_data = json.loads(cleaned)
 
         return Fix(
@@ -166,7 +141,7 @@ def generate_fix(
         )
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Failed to parse fix response: {e}. Raw: {response[:500]}")
-        raise ValueError(f"Claude returned an unparseable fix response: {e}")
+        raise ValueError(f"Gemini returned an unparseable fix response: {e}")
 
 
 def generate_retry_fix(
@@ -177,15 +152,6 @@ def generate_retry_fix(
 ) -> Fix:
     """
     Generate a revised fix after the previous attempt failed tests.
-
-    Args:
-        file_path: Path of the file being fixed.
-        original_snippet: The original code that was replaced.
-        new_snippet: The replacement code from the failed attempt.
-        test_output: The test failure output.
-
-    Returns:
-        A revised Fix dataclass.
     """
     prompt = RETRY_PROMPT.format(
         file_path=file_path,
@@ -193,13 +159,17 @@ def generate_retry_fix(
         new_snippet=new_snippet,
         test_output=test_output,
     )
-    response = _call_claude(prompt)
+    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
 
     try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
             cleaned = "\n".join(lines[1:-1])
+            
+        if cleaned.startswith("json\n"):
+            cleaned = cleaned[5:]
+
         fix_data = json.loads(cleaned)
 
         return Fix(
@@ -210,4 +180,4 @@ def generate_retry_fix(
         )
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Failed to parse retry fix response: {e}. Raw: {response[:500]}")
-        raise ValueError(f"Claude returned an unparseable retry fix response: {e}")
+        raise ValueError(f"Gemini returned an unparseable retry fix response: {e}")
