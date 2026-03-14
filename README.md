@@ -22,3 +22,4 @@ A multi-service platform that automatically resolves software incidents by analy
    Visit `http://localhost:3001` (dummy frontend) or test the dummy backend at `http://localhost:5000/simulate-incident` to trigger a simulated GitHub issue webhook.
 4. **Observe Flow:**
    Watch the dashboard as the incident is queued, the worker picks it up, runs the AI patch placeholder, and simulates creating a PR.
+# Syrus2026_Runtime_Rebels
