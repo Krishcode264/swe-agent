@@ -109,6 +109,13 @@ def create_branch(repo_path: str, branch_name: str) -> None:
         existing_branches = [b.name for b in repo.branches]
         if branch_name in existing_branches:
             logger.warning(f"Branch {branch_name} already exists — deleting and recreating...")
+            # We must checkout a different branch before we can delete it
+            default_branch = "main" if "main" in existing_branches else "master"
+            # Fallback to whatever the active branch is if main/master don't exist
+            if default_branch not in existing_branches and len(existing_branches) > 0:
+                 default_branch = existing_branches[0]
+            
+            repo.git.checkout(default_branch)
             repo.git.branch("-D", branch_name)
 
         repo.git.checkout("-b", branch_name)
