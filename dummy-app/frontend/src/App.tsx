@@ -47,17 +47,18 @@ function App() {
   const filteredProducts = products.filter(p => p.price <= maxPrice);
 
   return (
-    <div style={{ fontFamily: 'system-ui, sans-serif', maxWidth: '1000px', margin: '0 auto', padding: '2rem' }}>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #eaeaea', paddingBottom: '1rem', marginBottom: '2rem' }}>
-        <h1 style={{ margin: 0, color: '#2563eb' }}>NextGen Electronics</h1>
-        <button 
-          onClick={() => setShowPortal(!showPortal)} 
-          style={{ background: 'none', border: '1px solid #d1d5db', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer' }}>
-          {showPortal ? 'Return to Store' : 'Customer Portal'}
-        </button>
-      </header>
+    <div style={{ minHeight: '100vh', width: '100%', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+      <div style={{ flex: 1, fontFamily: 'system-ui, sans-serif', maxWidth: '1200px', width: '100%', margin: '0 auto', padding: '2rem', boxSizing: 'border-box' }}>
+        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #eaeaea', paddingBottom: '1rem', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
+          <h1 style={{ margin: 0, color: '#2563eb' }}>NextGen Electronics</h1>
+          <button 
+            onClick={() => setShowPortal(!showPortal)} 
+            style={{ background: 'none', border: '1px solid #d1d5db', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+            {showPortal ? 'Return to Store' : 'Customer Portal'}
+          </button>
+        </header>
 
-      {!showPortal ? (
+        {!showPortal ? (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
             <h2 style={{ fontSize: '1.25rem', margin: 0, color: '#374151' }}>Featured Products</h2>
@@ -79,15 +80,17 @@ function App() {
           
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '2rem' }}>
             {filteredProducts.map(p => (
-              <div key={p.id} style={{ border: '1px solid #e5e7eb', borderRadius: '8px', padding: '1.5rem', textAlign: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
-                <div style={{ width: '100%', height: '150px', background: '#f3f4f6', borderRadius: '4px', marginBottom: '1rem', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div key={p.id} style={{ display: 'flex', flexDirection: 'column', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '1.5rem', textAlign: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', backgroundColor: '#fff', height: '100%', boxSizing: 'border-box' }}>
+                <div style={{ width: '100%', height: '150px', background: '#f3f4f6', borderRadius: '4px', marginBottom: '1rem', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                   <img src={p.thumbnail} alt={p.title} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
                 </div>
-                <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', color: '#111827' }}>{p.title}</h3>
-                <p style={{ margin: 0, fontWeight: 'bold', color: '#2563eb' }}>${p.price.toFixed(2)}</p>
-                <button style={{ marginTop: '1rem', width: '100%', background: '#111827', color: 'white', padding: '0.5rem', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-                  Add to Cart
-                </button>
+                <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', color: '#111827', flexGrow: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{p.title}</h3>
+                <div style={{ marginTop: 'auto', paddingTop: '1rem' }}>
+                  <p style={{ margin: 0, fontWeight: 'bold', color: '#2563eb', fontSize: '1.2rem' }}>${p.price.toFixed(2)}</p>
+                  <button style={{ marginTop: '1rem', width: '100%', background: '#111827', color: 'white', padding: '0.5rem', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>
+                    Add to Cart
+                  </button>
+                </div>
               </div>
             ))}
             {filteredProducts.length === 0 && (
@@ -124,6 +127,7 @@ function App() {
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }
