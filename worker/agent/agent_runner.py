@@ -76,74 +76,114 @@ def _investigate_codebase(
     hypothesis: str,
     service_path: str,
     affected_file: Optional[str] = None,
+    report=None,
 ) -> tuple[str, str, str]:
     """
     Investigate the codebase to find the root cause.
-
     Uses file tools to navigate the code, then Claude to analyze.
-
-    Returns:
-        (root_cause, file_path, file_content) — the confirmed root cause,
-        the file containing the bug, and its contents.
+    Returns: (root_cause, file_path, file_content)
     """
+    import re
     files_analyzed = []
-
-    # Step 1: List the service directory to understand structure
     all_files = list_files(service_path)
     logger.info(f"Service has {len(all_files)} files")
 
-    # Step 2: If ticket mentions a specific file, start there
-    target_file = None
+    files_to_read = []
+
+    # Step 1: Parse stack trace if available
+    if error_message:
+        raw = re.findall(r'[\w/\\.-]+\.(?:js|ts|py|go|rs|jsx|tsx)', error_message)
+        stack_files = [p.split(':')[0] for p in raw if 'node_modules' not in p]
+        for num_file in stack_files:
+            for f in all_files:
+                if num_file in f or os.path.basename(num_file) in f:
+                    matched_path = os.path.join(service_path, f)
+                    if matched_path not in files_to_read:
+                        files_to_read.append(matched_path)
+
+    # Step 2: Add explicitly affected file if present
     if affected_file:
-        # Search for the affected file
         for f in all_files:
             if affected_file in f or os.path.basename(affected_file) in f:
-                target_file = os.path.join(service_path, f)
-                break
+                matched_path = os.path.join(service_path, f)
+                if matched_path not in files_to_read:
+                    files_to_read.append(matched_path)
 
-    # Step 3: If no specific file, search for error keywords
-    if not target_file and error_message:
-        # Extract key terms from the error message
+    # Step 3: Heuristics fallback if stack trace / affected_file yielded nothing
+    if not files_to_read and error_message:
         search_results = search_in_directory(service_path, error_message[:80])
         if search_results and not search_results[0].startswith("Error"):
-            # Take the first matching file
             first_match = search_results[0].split(":")[0]
-            target_file = os.path.join(service_path, first_match)
+            files_to_read.append(os.path.join(service_path, first_match))
 
-    # Step 4: If still no file, look for routes/views/controllers
-    if not target_file:
+    if not files_to_read:
         for pattern_dir in ["routes", "views", "controllers", "api", "services"]:
             for f in all_files:
                 if pattern_dir in f.lower():
-                    target_file = os.path.join(service_path, f)
+                    files_to_read.append(os.path.join(service_path, f))
                     break
-            if target_file:
+            if files_to_read:
                 break
 
-    if not target_file:
-        # Last resort: pick the main entry file
+    if not files_to_read:
         for f in all_files:
             if f.endswith(("app.py", "server.py", "index.js", "app.js", "server.js")):
-                target_file = os.path.join(service_path, f)
+                files_to_read.append(os.path.join(service_path, f))
                 break
 
-    if not target_file:
-        raise ValueError(f"Could not find any relevant file to investigate in {service_path}")
+    if not files_to_read:
+        logger.warning(f"Could not find any relevant file to investigate in {service_path}. Returning defaults.")
+        return "No relevant file found", "", ""
 
-    # Step 5: Read the target file
-    file_content = read_file(target_file)
-    files_analyzed.append(target_file)
-    logger.info(f"Investigating: {target_file}")
+    # Step 4: Multi-File ReAct Loop (Capped at 3 files)
+    root_cause = "Could not find root cause."
+    target_file = files_to_read[0]
+    file_content = ""
 
-    # Step 6: Ask Claude to analyze
-    root_cause = analyze_code(
-        incident_id=incident_id,
-        service=service,
-        error_message=error_message,
-        hypothesis=hypothesis,
-        file_path=target_file,
-        file_content=file_content,
-    )
+    for _ in range(3):
+        if not files_to_read:
+            break
+            
+        current_file = files_to_read.pop(0)
+        if current_file in files_analyzed:
+            continue
+
+        try:
+            file_content = read_file(current_file)
+            files_analyzed.append(current_file)
+            if report:
+                report.files_analyzed.append(current_file)
+                
+            logger.info(f"Investigating: {current_file}")
+
+            analysis = analyze_code(
+                incident_id=incident_id,
+                service=service,
+                error_message=error_message,
+                hypothesis=hypothesis,
+                file_path=current_file,
+                file_content=file_content,
+            )
+
+            root_cause = analysis.get("root_cause_explanation", "")
+            target_file = current_file
+            
+            if analysis.get("found_root_cause"):
+                logger.info("Root cause found.")
+                break
+            else:
+                next_files = analysis.get("suggested_next_files", [])
+                logger.info(f"Root cause not in {current_file}, LLM suggested: {next_files}")
+                for nf in next_files:
+                    for f in all_files:
+                        if nf in f or os.path.basename(nf) in f:
+                            matched = os.path.join(service_path, f)
+                            if matched not in files_to_read and matched not in files_analyzed:
+                                files_to_read.append(matched)
+                                
+        except Exception as e:
+            logger.warning(f"Failed to investigate {current_file}: {e}")
+            continue
 
     return root_cause, target_file, file_content
 
@@ -240,6 +280,7 @@ def _generate_report_markdown(report: ResolutionReport) -> str:
             test_output=report.test_results.output[:2000] if report.test_results else "N/A",
             retry_count=report.retry_count,
             files_analyzed=", ".join(report.files_analyzed),
+            env_error_detected=report.env_error_detected,
         )
         return _call_gemini(prompt)
     except Exception as e:
@@ -333,6 +374,7 @@ def process_incident(incident: dict) -> ResolutionReport:
         fix = None
         test_results = None
         service_type = "python" if service.lower().startswith("python") else "node"
+        previous_attempts_history = ""
 
         for attempt in range(1, MAX_RETRIES + 2):  # +2 because range is exclusive and attempt starts at 1
             report.retry_count = attempt
@@ -357,8 +399,7 @@ def process_incident(incident: dict) -> ResolutionReport:
                 )
                 fix = generate_retry_fix(
                     file_path=target_file,
-                    original_snippet=fix.original_snippet,
-                    new_snippet=fix.new_snippet,
+                    previous_attempts=previous_attempts_history,
                     test_output=test_results.output[:3000] if test_results else "",
                 )
                 # Re-read file content (may have changed from previous attempt)
@@ -367,17 +408,32 @@ def process_incident(incident: dict) -> ResolutionReport:
             report.fix = fix
             logger.info(f"Fix attempt {attempt}: {fix.explanation}")
 
+            previous_attempts_history += f"Attempt {attempt}:\nFile: {target_file}\nExplanation: {fix.explanation}\nOriginal: {fix.original_snippet}\nNew: {fix.new_snippet}\n"
+
             # Apply the fix
             applied = _apply_fix_to_file(target_file, fix)
-            if not applied:
+            if not applied and not fix.no_fix_needed:
                 logger.error(f"Failed to apply fix on attempt {attempt}")
                 continue
+
+            if fix.no_fix_needed:
+                logger.info(f"Fix generation stated no fix needed. Stopping retries.")
+                break
 
             update_incident_status(incident_id, "fix_applied", "Fix applied, running tests")
 
             # Run tests
             test_results = _run_tests_in_service(service_path, service_type)
             report.test_results = test_results
+            previous_attempts_history += f"Test Output:\n{test_results.output[:1000]}\n" + "-" * 40 + "\n"
+
+            env_error_keywords = ["WinError 2", "ENOENT", "command not found", "MODULE_NOT_FOUND"]
+            if any(kw in test_results.output for kw in env_error_keywords):
+                logger.warning("Environment error detected — skipping retries.")
+                fix.no_fix_needed = True
+                fix.explanation = f"Skipped: environment error ({test_results.output[:120]})"
+                report.env_error_detected = True
+                break
 
             if test_results.passed:
                 logger.info(f"Tests PASSED on attempt {attempt}!")
@@ -392,7 +448,10 @@ def process_incident(incident: dict) -> ResolutionReport:
                     )
 
         # ── Step 5: Calculate confidence score ──
-        if test_results and test_results.passed:
+        if report.env_error_detected:
+            # Score code analysis, don't penalize for env failure
+            report.confidence_score = max(50, 80 - (report.retry_count - 1) * 10)
+        elif test_results and test_results.passed:
             report.confidence_score = max(60, 95 - (report.retry_count - 1) * 15)
         elif test_results:
             report.confidence_score = max(10, 40 - (report.retry_count - 1) * 10)

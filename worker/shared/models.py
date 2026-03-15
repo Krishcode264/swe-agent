@@ -21,6 +21,7 @@ class Fix:
     explanation: str         # Human-readable explanation of what was changed and why
     original_snippet: str    # The exact code before the fix
     new_snippet: str         # The exact code after the fix
+    no_fix_needed: bool = False # Set True if the issue is environmental/infra and cannot be patched here
 
 
 @dataclass
@@ -53,4 +54,5 @@ class ResolutionReport:
     confidence_score: int = 0               # 0-100, agent's self-assessed certainty
     retry_count: int = 0                    # Number of fix attempts (0 = haven't tried yet)
     pr_url: Optional[str] = None            # GitHub PR URL (None if PR not created yet)
+    env_error_detected: bool = False        # True if a test failure was classified as an environment error
     report_markdown: str = ""               # Rendered markdown report (filled by report generator)

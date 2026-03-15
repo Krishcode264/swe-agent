@@ -79,9 +79,15 @@ ANALYZE_CODE_PROMPT = """You are investigating a software incident. Here is the 
 1. Study this code carefully.
 2. Identify the specific line(s) that cause the reported error.
 3. Explain the root cause — what exactly is wrong and why it produces the reported behavior.
-4. If this file is not the source of the bug, suggest which file to investigate next and why.
 
 Be precise. Cite specific line numbers and variable names.
+
+Respond in this exact JSON format:
+{{
+    "found_root_cause": boolean, // True if this file contains the fixable bug
+    "root_cause_explanation": "Detailed explanation of the problem here, or why you are moving on",
+    "suggested_next_files": ["app/routes/db.js", "app/config/index.js"] // If found_root_cause is false, what files should we read next?
+}}
 """
 
 
@@ -103,7 +109,8 @@ Generate the MINIMUM code change to fix this bug. Your response must be in this 
     "file_path": "{file_path}",
     "explanation": "Brief explanation of the fix",
     "original_snippet": "The exact lines of code to replace (copy-paste from the file above)",
-    "new_snippet": "The corrected code that replaces the original"
+    "new_snippet": "The corrected code that replaces the original",
+    "no_fix_needed": boolean
 }}
 
 ## Rules
@@ -112,39 +119,35 @@ Generate the MINIMUM code change to fix this bug. Your response must be in this 
 - The original_snippet must be an EXACT substring of the code above — character for character.
 - The new_snippet must be a drop-in replacement.
 - Do NOT add unrelated improvements, refactoring, or comments.
+- If the issue is purely environmental (e.g., missing database connection, missing node modules, incorrect Node.js version) and absolutely cannot be patched with a code change here, set "no_fix_needed": true, and leave new_snippet and original_snippet as empty strings. 
 """
 
 
-RETRY_PROMPT = """Your previous fix did not pass the tests. Here is the test output:
+RETRY_PROMPT = """Your previous fix attempt(s) did not pass the tests. 
 
-## Previous Fix
-**File**: {file_path}
-**Change**: Replaced:
-```
-{original_snippet}
-```
-With:
-```
-{new_snippet}
-```
+## Previous Attempts & Failure History
+{previous_attempts}
 
-## Test Output (FAILED)
+## Test Output From Last Run (FAILED)
 ```
 {test_output}
 ```
 
 ## Your Task
-1. Analyze why the tests failed.
-2. Determine if your fix was incorrect or if the test reveals an additional issue.
-3. Generate a revised fix.
+1. Analyze why the tests failed based on the history above.
+2. Determine if your fix was incorrect or if the test reveals an additional issue. Do not repeat a fix that already failed.
+3. Generate a revised fix for the file: {file_path}.
 
 Respond in the same JSON format:
 {{
-    "file_path": "path/to/file",
+    "file_path": "{file_path}",
     "explanation": "What was wrong with the previous fix and what this revision does",
     "original_snippet": "The exact lines to replace (from the CURRENT state of the file)",
-    "new_snippet": "The corrected replacement"
+    "new_snippet": "The corrected replacement",
+    "no_fix_needed": boolean
 }}
+
+If the test failure was an environment failure (winerror, ENOENT, missing npm module outside your control), set `no_fix_needed`: true to skip making a code patch and exit gracefully.
 """
 
 
@@ -173,6 +176,7 @@ REPORT_PROMPT = """Generate a structured resolution report for the following res
 - **Test Output**: {test_output}
 - **Fix Attempts**: {retry_count}
 - **Files Analyzed**: {files_analyzed}
+- **Environment Error Detected**: {env_error_detected}
 
 ## Generate
 Write a professional resolution report in markdown format including:
@@ -180,6 +184,6 @@ Write a professional resolution report in markdown format including:
 2. Root cause analysis
 3. Fix description with before/after code
 4. Validation results
-5. Confidence assessment (0-100 with justification)
+5. Confidence assessment (0-100 with justification). If `Environment Error Detected` is True, do not artificially deflate the score just because tests failed - score your confidence in your *code analysis* and note that the environment was unavailable.
 6. Risk assessment (what could still go wrong)
 """

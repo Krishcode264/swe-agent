@@ -119,9 +119,10 @@ def analyze_code(
     hypothesis: str,
     file_path: str,
     file_content: str,
-) -> str:
+) -> dict:
     """
     Analyze a code file in the context of an incident to identify the root cause.
+    Returns a dict with found_root_cause, root_cause_explanation, and suggested_next_files.
     """
     prompt = ANALYZE_CODE_PROMPT.format(
         incident_id=incident_id,
@@ -131,8 +132,23 @@ def analyze_code(
         file_path=file_path,
         file_content=file_content,
     )
-    # Could use gemini-2.5-pro here, but sticking to flash for safety against rate limits
-    return _call_gemini(prompt, model_name="gemini-2.5-flash")
+    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
+    
+    try:
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            cleaned = "\n".join(lines[1:-1])
+        if cleaned.startswith("json\n"):
+            cleaned = cleaned[5:]
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.warning(f"Failed to parse analyze_code response as JSON. Raw: {response[:200]}")
+        return {
+            "found_root_cause": True, # Assume true as a fallback
+            "root_cause_explanation": response,
+            "suggested_next_files": []
+        }
 
 
 def generate_fix(
@@ -169,6 +185,7 @@ def generate_fix(
             explanation=fix_data.get("explanation", ""),
             original_snippet=fix_data.get("original_snippet", ""),
             new_snippet=fix_data.get("new_snippet", ""),
+            no_fix_needed=fix_data.get("no_fix_needed", False),
         )
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Failed to parse fix response: {e}. Raw: {response[:500]}")
@@ -177,17 +194,16 @@ def generate_fix(
 
 def generate_retry_fix(
     file_path: str,
-    original_snippet: str,
-    new_snippet: str,
+    previous_attempts: str,
     test_output: str,
 ) -> Fix:
     """
-    Generate a revised fix after the previous attempt failed tests.
+    Generate a revised fix after previous attempts failed tests.
+    Uses cumulative history to avoid repeating mistakes.
     """
     prompt = RETRY_PROMPT.format(
         file_path=file_path,
-        original_snippet=original_snippet,
-        new_snippet=new_snippet,
+        previous_attempts=previous_attempts,
         test_output=test_output,
     )
     response = _call_gemini(prompt, model_name="gemini-2.5-flash")
@@ -208,6 +224,7 @@ def generate_retry_fix(
             explanation=fix_data.get("explanation", ""),
             original_snippet=fix_data.get("original_snippet", ""),
             new_snippet=fix_data.get("new_snippet", ""),
+            no_fix_needed=fix_data.get("no_fix_needed", False),
         )
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Failed to parse retry fix response: {e}. Raw: {response[:500]}")
