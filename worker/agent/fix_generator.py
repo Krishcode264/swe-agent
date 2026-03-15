@@ -58,11 +58,41 @@ def _call_gemini(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
         raise
 
 
-def parse_ticket(ticket_json: str) -> dict:
+def parse_ticket(
+    incident_id: str,
+    repository: str,
+    issue_number,
+    title: str,
+    description: str,
+    error_log: str,
+) -> dict:
     """
-    Parse an incident ticket JSON and extract structured information.
+    Parse an incident's pre-extracted fields and use Gemini to:
+    1. Classify the service/language.
+    2. Generate a root-cause hypothesis.
+
+    All heavy extraction is already done by Krishna's webhook — we only ask Gemini
+    for what it's actually best at: reasoning and classification.
+
+    Args:
+        incident_id: The incident ID (e.g. "INC-0042").
+        repository: The GitHub repo full name (e.g. "Rezinix-AI/shopstack-platform").
+        issue_number: The GitHub issue number (int or empty string).
+        title: The issue title.
+        description: The full issue body text.
+        error_log: The pre-extracted error log / stack trace.
+
+    Returns:
+        Dictionary with: service, error_type, error_message, affected_file, hypothesis.
     """
-    prompt = PARSE_TICKET_PROMPT.format(ticket_json=ticket_json)
+    prompt = PARSE_TICKET_PROMPT.format(
+        incident_id=incident_id,
+        repository=repository,
+        issue_number=issue_number,
+        title=title,
+        description=description,
+        error_log=error_log or "Not provided",
+    )
     response = _call_gemini(prompt)
 
     try:
@@ -74,11 +104,12 @@ def parse_ticket(ticket_json: str) -> dict:
     except json.JSONDecodeError:
         logger.warning(f"Failed to parse ticket response as JSON, returning raw: {response[:200]}")
         return {
-            "incident_id": "unknown",
+            "incident_id": incident_id,
             "service": "unknown",
-            "error_message": response,
-            "hypothesis": response,
+            "error_message": error_log[:300] if error_log else response,
+            "hypothesis": response[:300],
         }
+
 
 
 def analyze_code(

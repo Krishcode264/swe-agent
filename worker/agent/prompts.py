@@ -33,22 +33,31 @@ You have access to tools that let you navigate a repository:
 """
 
 
-PARSE_TICKET_PROMPT = """Analyze the following incident ticket and extract structured information.
+PARSE_TICKET_PROMPT = """You are analyzing a pre-structured software incident. Most fields have been pre-extracted from the GitHub issue by our webhook system. Your job is to:
+1. Determine which service / language is affected.
+2. Form an intelligent hypothesis about the root cause.
 
-## Incident Ticket
-{ticket_json}
+## Incident Data
+- **Incident ID**: {incident_id}
+- **Repository**: {repository}
+- **Issue Number**: #{issue_number}
+- **Title**: {title}
+- **Description**: {description}
+- **Error Log** (pre-extracted):
+```
+{error_log}
+```
 
-## Extract the following:
-1. **incident_id**: The ticket ID
-2. **service**: Which service is affected (python-service or node-service)
-3. **error_type**: The category of bug (runtime-crash, logic-bug, misconfiguration, etc.)
-4. **error_message**: The key error message or stack trace
-5. **affected_file**: The file most likely to contain the bug (from error logs or description)
-6. **severity**: The priority level
-7. **reproduction_steps**: How to reproduce the issue
-8. **hypothesis**: Your initial theory about what might be wrong
-
-Respond in JSON format with these exact keys.
+## Your Task
+Respond ONLY in this exact JSON format with no extra text:
+{{
+    "incident_id": "{incident_id}",
+    "service": "python-service OR node-service (pick based on repo and error log language)",
+    "error_type": "runtime-crash | logic-bug | misconfiguration | missing-dependency | type-error | other",
+    "error_message": "The single most important line from the error log above",
+    "affected_file": "The file path most likely containing the bug, extracted from the error log stack trace",
+    "hypothesis": "Your 1-2 sentence theory: what is wrong and why"
+}}
 """
 
 

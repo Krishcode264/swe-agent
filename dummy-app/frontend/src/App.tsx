@@ -1,36 +1,18 @@
-import React, { useState, useEffect } from 'react';
-
-// @ts-ignore
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
-
-interface Product {
-  id: number;
-  title: string;
-  price: number;
-  thumbnail: string;
-}
+import React, { useState } from 'react';
 
 function App() {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [maxPrice, setMaxPrice] = useState<number>(1000);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [message, setMessage] = useState('');
-  const [showPortal, setShowPortal] = useState(false);
-
-  useEffect(() => {
-    fetch('https://dummyjson.com/products?limit=12')
-      .then(res => res.json())
-      .then(data => setProducts(data.products || []))
-      .catch(err => console.error("Failed to load products", err));
-  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch(`${API_URL}/auth/login`, {
+      const res = await fetch('http://localhost:5000/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({ email, password }),
       });
       const data = await res.json();
@@ -40,93 +22,57 @@ function App() {
         setMessage(`Error: ${data.error} - ${data.detail}`);
       }
     } catch (error: any) {
+      console.log(" issue withy efcthcing ")
       setMessage(`Network error: ${error.message}`);
     }
   };
 
-  const filteredProducts = products.filter(p => p.price <= maxPrice);
+  const simulateIncident = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/simulate-incident', { method: 'POST' });
+      const data = await res.json();
+      setMessage(data.message || 'Simulated incident triggered on backend!');
+    } catch (error: any) {
+      setMessage('Failed to trigger simulation');
+    }
+  };
 
   return (
-    <div style={{ minHeight: '100vh', width: '100%', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
-      <div style={{ flex: 1, fontFamily: 'system-ui, sans-serif', maxWidth: '1200px', width: '100%', margin: '0 auto', padding: '2rem', boxSizing: 'border-box' }}>
-        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #eaeaea', paddingBottom: '1rem', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
-          <h1 style={{ margin: 0, color: '#2563eb' }}>NextGen Electronics</h1>
-          <button 
-            onClick={() => setShowPortal(!showPortal)} 
-            style={{ background: 'none', border: '1px solid #d1d5db', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', whiteSpace: 'nowrap' }}>
-            {showPortal ? 'Return to Store' : 'Customer Portal'}
-          </button>
-        </header>
+    <div style={{ background: '#fff', padding: '2rem', borderRadius: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
+      <h2 style={{ textAlign: 'center', marginBottom: '1.5rem', color: '#1a1a1a' }}>Login to AwesomeApp</h2>
+      <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <input 
+          type="email" 
+          placeholder="user@example.com" 
+          value={email}
+          onChange={e => setEmail(e.target.value)}
+          style={{ padding: '0.75rem', border: '1px solid #ccc', borderRadius: '4px' }}
+        />
+        <input 
+          type="password" 
+          placeholder="Password" 
+          value={password}
+          onChange={e => setPassword(e.target.value)}
+          style={{ padding: '0.75rem', border: '1px solid #ccc', borderRadius: '4px' }}
+        />
+        <button type="submit" style={{ padding: '0.75rem', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
+          Log In
+        </button>
+      </form>
 
-        {!showPortal ? (
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-            <h2 style={{ fontSize: '1.25rem', margin: 0, color: '#374151' }}>Featured Products</h2>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-              <label htmlFor="price-filter" style={{ fontSize: '0.9rem', color: '#4b5563' }}>
-                Max Price: ${maxPrice}
-              </label>
-              <input 
-                id="price-filter"
-                type="range" 
-                min="0" 
-                max="2000" 
-                step="50" 
-                value={maxPrice} 
-                onChange={(e) => setMaxPrice(Number(e.target.value))} 
-              />
-            </div>
-          </div>
-          
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '2rem' }}>
-            {filteredProducts.map(p => (
-              <div key={p.id} style={{ display: 'flex', flexDirection: 'column', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '1.5rem', textAlign: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', backgroundColor: '#fff', height: '100%', boxSizing: 'border-box' }}>
-                <div style={{ width: '100%', height: '150px', background: '#f3f4f6', borderRadius: '4px', marginBottom: '1rem', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <img src={p.thumbnail} alt={p.title} style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }} />
-                </div>
-                <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', color: '#111827', flexGrow: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{p.title}</h3>
-                <div style={{ marginTop: 'auto', paddingTop: '1rem' }}>
-                  <p style={{ margin: 0, fontWeight: 'bold', color: '#2563eb', fontSize: '1.2rem' }}>${p.price.toFixed(2)}</p>
-                  <button style={{ marginTop: '1rem', width: '100%', background: '#111827', color: 'white', padding: '0.5rem', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}>
-                    Add to Cart
-                  </button>
-                </div>
-              </div>
-            ))}
-            {filteredProducts.length === 0 && (
-              <p style={{ color: '#6b7280', gridColumn: '1 / -1', textAlign: 'center', padding: '2rem' }}>No products found under ${maxPrice}.</p>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div style={{ maxWidth: '400px', margin: '3rem auto', background: '#f9fafb', padding: '2rem', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-          <h2 style={{ textAlign: 'center', marginTop: 0, marginBottom: '1.5rem', color: '#111827' }}>Sign In to Portal</h2>
-          <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <input 
-              type="email" 
-              placeholder="user@example.com" 
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '4px' }}
-            />
-            <input 
-              type="password" 
-              placeholder="Password" 
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '4px' }}
-            />
-            <button type="submit" style={{ padding: '0.75rem', background: '#2563eb', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
-              Log In
-            </button>
-          </form>
-          {message && (
-            <div style={{ marginTop: '1rem', padding: '1rem', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontSize: '14px', border: '1px solid #fecaca' }}>
-              {message}
-            </div>
-          )}
+      {message && (
+        <div style={{ marginTop: '1rem', padding: '1rem', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontSize: '14px' }}>
+          {message}
         </div>
       )}
+
+      <hr style={{ margin: '2rem 0', border: 'none', borderTop: '1px solid #eee' }} />
+      
+      <div style={{ textAlign: 'center' }}>
+        <p style={{ fontSize: '12px', color: '#666', marginBottom: '1rem' }}>Admin Tools:</p>
+        <button onClick={simulateIncident} style={{ padding: '0.5rem 1rem', background: '#dc2626', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+          🚨 Simulate Production Incident
+        </button>
       </div>
     </div>
   );

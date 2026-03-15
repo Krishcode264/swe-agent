@@ -8,6 +8,5 @@ RUN npm install
 COPY . .
 
 # Tailwind logic
-RUN npx tailwindcss init -p
 
 CMD ["npm", "run", "dev"]

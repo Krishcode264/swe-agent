@@ -286,8 +286,17 @@ def process_incident(incident: dict) -> ResolutionReport:
 
     try:
         # ── Step 1: Parse the ticket ──
+        # Use Krishna's pre-extracted fields directly — much cheaper than asking Gemini to re-extract them
         update_incident_status(incident_id, "parsing", "Parsing incident ticket")
-        parsed = parse_ticket(ticket_text)
+        from agent.prompts import PARSE_TICKET_PROMPT
+        parsed = parse_ticket(
+            incident_id=incident_id,
+            repository=incident.get("repository", repo_url),
+            issue_number=incident.get("issue_number", ""),
+            title=incident.get("title", ""),
+            description=incident.get("description", ""),
+            error_log=incident.get("error_log", ""),
+        )
         service = parsed.get("service", "unknown")
         error_message = parsed.get("error_message", "")
         hypothesis = parsed.get("hypothesis", "")
@@ -298,11 +307,13 @@ def process_incident(incident: dict) -> ResolutionReport:
 
         # ── Step 2: Clone/locate the repository ──
         update_incident_status(incident_id, "cloning", "Cloning repository")
-        from agent.repo_manager import clone_repo, create_branch
+        from agent.repo_manager import clone_repo, create_branch, commit_fix, push_branch, cleanup_repo
 
         repo_path = clone_repo(repo_url or "https://github.com/Rezinix-AI/shopstack-platform.git")
         service_path = _detect_service_root(repo_path, service)
-        branch_name = f"fix/{incident_id.lower()}"
+        # Use issue_number for branch name if available (e.g. fix/42), else use incident_id
+        issue_number = incident.get("issue_number")
+        branch_name = f"fix/{issue_number}" if issue_number else f"fix/{incident_id.lower()}"
         create_branch(repo_path, branch_name)
 
         # ── Step 3: Investigate the codebase ──
