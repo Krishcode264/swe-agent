@@ -6,12 +6,20 @@ import { logger } from '../utils/logger';
 
 const router = Router();
 
-router.post('/github', async (req: Request, res: Response) => {
+router.post('/github', async (req: Request, res: Response): Promise<any> => {
   try {
+    const githubEvent = req.headers['x-github-event'];
+    if (githubEvent !== 'issues') {
+      return res.status(200).send('ignore');
+    }
+
     const payload = req.body;
     
-    // Webhook validation can be added here
-    logger.info('Received webhook payload');
+    if (payload.action !== 'labeled' || payload.label?.name !== 'assign to agent') {
+      return res.status(200).send('ignore');
+    }
+
+    logger.info('Received valid assigned github issue payload');
 
     // Convert issue to structured incident
     const incidentData = githubService.extractIncidentData(payload);

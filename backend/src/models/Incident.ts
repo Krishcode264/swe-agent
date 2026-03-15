@@ -17,6 +17,11 @@ export interface IIncident extends Document {
   recent_changes: string;
   tags: string[];
   status: 'queued' | 'running' | 'fix_generated' | 'tests_passed' | 'pr_created' | 'completed' | 'failed';
+  issue_number?: number;
+  issue_url?: string;
+  source?: string;
+  triggered_by?: string;
+  assigned_agent?: string;
 }
 
 const IncidentSchema: Schema = new Schema({
@@ -35,7 +40,12 @@ const IncidentSchema: Schema = new Schema({
   actual_behavior: { type: String },
   recent_changes: { type: String },
   tags: { type: [String] },
-  status: { type: String, enum: ['queued', 'running', 'fix_generated', 'tests_passed', 'pr_created', 'completed', 'failed'], default: 'queued' }
+  status: { type: String, enum: ['queued', 'running', 'fix_generated', 'tests_passed', 'pr_created', 'completed', 'failed'], default: 'queued' },
+  issue_number: { type: Number },
+  issue_url: { type: String },
+  source: { type: String },
+  triggered_by: { type: String },
+  assigned_agent: { type: String }
 }, { timestamps: true });
 
 export const Incident = mongoose.model<IIncident>('Incident', IncidentSchema);
