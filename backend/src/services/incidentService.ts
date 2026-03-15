@@ -27,6 +27,10 @@ export const incidentService = {
     return incident;
   },
 
+  updateIncident: async (id: string, data: Partial<IIncident>) => {
+    return await Incident.findOneAndUpdate({ incidentId: id }, data, { new: true });
+  },
+
   addTimelineEvent: async (incidentId: string, message: string, status: string) => {
     const event = new TimelineEvent({ incidentId, message, status });
     await event.save();

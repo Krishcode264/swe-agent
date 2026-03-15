@@ -32,6 +32,16 @@ router.get('/:id/timeline', async (req: Request, res: Response) => {
   }
 });
 
+router.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const incident = await incidentService.updateIncident(req.params.id, req.body);
+    if (!incident) return res.status(404).json({ error: 'Not found' });
+    res.json(incident);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update incident' });
+  }
+});
+
 router.put('/:id/status', async (req: Request, res: Response) => {
   try {
     const { status, message } = req.body;

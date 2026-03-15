@@ -17,21 +17,26 @@ import logging
 import os
 from typing import Optional
 
-from shared.models import Fix, TestResults, ResolutionReport
-from agent.fix_generator import (
+from ..shared.models import Fix, TestResults, ResolutionReport
+from ..shared.database_client import update_incident_status
+from ..sandbox.apply_fix import apply_fix
+from ..sandbox.test_runner import run_tests
+from ..github.pr_creator import PRCreator
+
+from .fix_generator import (
     parse_ticket,
     analyze_code,
     generate_fix,
     generate_retry_fix,
 )
-from agent.tools import (
+from .tools import (
     list_files,
     read_file,
     search_in_file,
     search_in_directory,
 )
-from agent.prompts import REPORT_PROMPT
-from agent.fix_generator import _call_gemini
+from .prompts import REPORT_PROMPT
+from .fix_generator import _call_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -211,57 +216,10 @@ def _apply_fix_to_file(file_path: str, fix: Fix) -> bool:
         return False
 
 
+# These are now handled by sandboxed modules.
 def _run_tests_in_service(service_path: str, service_type: str) -> TestResults:
-    """
-    Run tests for the given service. This is a placeholder that will be replaced
-    by Krishna's sandbox module (worker/sandbox/test_runner.py).
-
-    For now, detects the test framework and runs via subprocess.
-    """
-    import subprocess
-
-    try:
-        if service_type in ("python", "python-service"):
-            # Install deps + run pytest
-            subprocess.run(
-                ["pip", "install", "-r", "requirements.txt"],
-                cwd=service_path,
-                capture_output=True,
-                timeout=120,
-            )
-            result = subprocess.run(
-                ["python", "-m", "pytest", "-v", "--tb=short"],
-                cwd=service_path,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        elif service_type in ("node", "node-service"):
-            subprocess.run(
-                ["npm", "install"],
-                cwd=service_path,
-                capture_output=True,
-                timeout=120,
-            )
-            result = subprocess.run(
-                ["npm", "test"],
-                cwd=service_path,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        else:
-            return TestResults(passed=False, output=f"Unknown service type: {service_type}")
-
-        output = result.stdout + "\n" + result.stderr
-        passed = result.returncode == 0
-
-        return TestResults(passed=passed, output=output)
-
-    except subprocess.TimeoutExpired:
-        return TestResults(passed=False, output="Tests timed out after 120 seconds.")
-    except Exception as e:
-        return TestResults(passed=False, output=f"Test execution error: {e}")
+    """Wrapper for the new sandboxed test runner."""
+    return run_tests(service_path, service_type=service_type)
 
 
 def _generate_report_markdown(report: ResolutionReport) -> str:
@@ -301,13 +259,13 @@ def process_incident(incident: dict) -> ResolutionReport:
     Returns:
         A fully populated ResolutionReport.
     """
-    # Extract incident ID (support both formats: incidentId and id)
+    # Extract incident ID
     incident_id = incident.get("incidentId") or incident.get("id", "unknown")
     repo_url = incident.get("repository", "")
     ticket_text = json.dumps(incident, indent=2)
 
     logger.info(f"=== Starting agent workflow for {incident_id} ===")
-
+    
     # Initialize the report
     report = ResolutionReport(
         incident_id=incident_id,
@@ -316,14 +274,6 @@ def process_incident(incident: dict) -> ResolutionReport:
         root_cause="",
         files_analyzed=[],
     )
-
-    # Import status updater (lazy to avoid circular imports with queue_listener)
-    try:
-        from queue_listener import update_incident_status
-    except ImportError:
-        # Running standalone (not from queue), use a no-op
-        def update_incident_status(id, status, msg):
-            logger.info(f"[{id}] {status}: {msg}")
 
     try:
         # ── Step 1: Parse the ticket ──
@@ -411,8 +361,8 @@ def process_incident(incident: dict) -> ResolutionReport:
 
             previous_attempts_history += f"Attempt {attempt}:\nFile: {target_file}\nExplanation: {fix.explanation}\nOriginal: {fix.original_snippet}\nNew: {fix.new_snippet}\n"
 
-            # Apply the fix
-            applied = _apply_fix_to_file(target_file, fix)
+            # Apply the fix (using precision matching)
+            applied = apply_fix(repo_path, fix)
             if not applied and not fix.no_fix_needed:
                 logger.error(f"Failed to apply fix on attempt {attempt}")
                 continue
@@ -466,10 +416,22 @@ def process_incident(incident: dict) -> ResolutionReport:
         # ── Step 7: Create PR (if tests passed) ──
         if test_results and test_results.passed:
             try:
-                from agent.github_client import create_pull_request
-                pr_url = create_pull_request(repo_url, branch_name, incident)
+                # Use real PR Creator
+                pr_creator = PRCreator()
+                # Commit changes first (pass repo_path, affected_file_path, incident_id)
+                commit_fix(repo_path, target_file, incident_id)
+                push_branch(repo_path, branch_name)
+                
+                pr_url = pr_creator.create_pull_request(
+                    repo_name=repo_url.split("github.com/")[-1].replace(".git", ""),
+                    branch_name=branch_name,
+                    title=f"Fix {incident_id}: {incident.get('title')}",
+                    body=report.report_markdown
+                )
                 report.pr_url = pr_url
                 update_incident_status(incident_id, "pr_created", f"PR created: {pr_url}")
+                # Final Status
+                update_incident_status(incident_id, "completed", "Incident resolved successfully with PR.")
             except Exception as e:
                 logger.error(f"Failed to create PR: {e}")
                 update_incident_status(incident_id, "pr_failed", f"PR creation failed: {e}")

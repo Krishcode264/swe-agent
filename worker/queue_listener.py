@@ -3,18 +3,12 @@ import redis
 import logging
 import requests
 from config import REDIS_URL, QUEUE_NAME, BACKEND_API_URL
+from shared.database_client import update_incident_status
 from agent.agent_runner import process_incident
 
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
-def update_incident_status(incident_id, status, message):
-    try:
-        url = f"{BACKEND_API_URL}/incidents/{incident_id}/status"
-        payload = {"status": status, "message": message}
-        requests.put(url, json=payload)
-        logging.info(f"Updated backend status for {incident_id} to {status}")
-    except Exception as e:
-        logging.error(f"Failed to update backend status: {e}")
+# Removed local update_incident_status as it is now imported from shared.database_client
 
 def listen_for_tasks():
     logging.info(f"Listening on Redis queue: {QUEUE_NAME}")

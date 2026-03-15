@@ -12,6 +12,9 @@ langchain-core>=0.3.0
 # GitHub PR creation
 PyGithub>=2.1.0
 
+# Sandbox isolation
+docker>=6.1.0
+
 # Report generation
 Jinja2>=3.1.0
 
