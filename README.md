@@ -1,4 +1,7 @@
-# Syrus2026_Runtime_Rebels: Autonomous Engineering Agent Platform
+# Team: Runtime Rebels
+## Problem Statement: Autonomous Incident-to-Fix Engineering Agent
+
+### Syrus2026: Autonomous Engineering Agent Platform
 
 An end-to-end platform designed to automatically detect, analyze, and resolve software incidents. By combining GitHub webhooks, AI-driven reasoning, and Docker-based sandboxed execution, the system completes the full loop from issue creation to Pull Request submission.
 
