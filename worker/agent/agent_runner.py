@@ -366,9 +366,10 @@ def process_incident(incident: dict) -> ResolutionReport:
             hypothesis=hypothesis,
             service_path=service_path,
             affected_file=affected_file,
+            report=report,
         )
         report.root_cause = root_cause
-        report.files_analyzed.append(target_file)
+        # No need to manually append target_file since _investigate_codebase now handles reporting analyzed files
 
         # ── Step 4: Generate and apply fix (with retry loop) ──
         fix = None
