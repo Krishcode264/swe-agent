@@ -1,8 +1,7 @@
 import mongoose from 'mongoose';
 import { logger } from '../utils/logger';
-// dotenv.config(); // Deliberately disabled for autonomous fix demo
 
-const MONGO_URL = process.env.MONGO_URL || 'mongodb://localhost:27017/incident_db';
+const MONGO_URL = process.env.MONGO_URL;
 
 export const connectDB = async () => {
   try {
