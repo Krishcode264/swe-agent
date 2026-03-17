@@ -260,7 +260,7 @@ def process_incident(incident: dict) -> ResolutionReport:
         A fully populated ResolutionReport.
     """
     # Extract incident ID
-    incident_id = incident.get("incidentId") or incident.get("id", "unknown")
+    incident_id = incident.get("incidentId") or incident.get("task_id") or incident.get("id", "unknown")
     repo_url = incident.get("repository", "")
     ticket_text = json.dumps(incident, indent=2)
 

@@ -6,6 +6,24 @@ import { logger } from '../utils/logger';
 
 const router = Router();
 
+router.post('/simulate', async (req: Request, res: Response): Promise<any> => {
+  try {
+    const incidentData = req.body;
+    logger.info('Simulating incident ingestion', incidentData.incidentId);
+
+    // Create in DB
+    const incident = await incidentService.createIncident(incidentData);
+    
+    // Push to Redis Queue
+    await queueService.pushTask(incident);
+    
+    res.status(202).json({ message: 'Simulated incident queued successfully', incidentId: incident.incidentId });
+  } catch (error) {
+    logger.error('Error simulating incident', error);
+    res.status(500).json({ error: 'Failed to simulate incident' });
+  }
+});
+
 router.post('/github', async (req: Request, res: Response): Promise<any> => {
   try {
     const githubEvent = req.headers['x-github-event'];
