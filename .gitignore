@@ -60,3 +60,8 @@ coverage/
 # Temp files
 tmp/
 temp/
+ngrok_bin/
+.ngrok2/
+*.tgz
+*.zip
+*.tar.gz
