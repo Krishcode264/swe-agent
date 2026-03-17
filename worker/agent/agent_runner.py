@@ -17,11 +17,11 @@ import logging
 import os
 from typing import Optional
 
-from ..shared.models import Fix, TestResults, ResolutionReport
-from ..shared.database_client import update_incident_status
-from ..sandbox.apply_fix import apply_fix
-from ..sandbox.test_runner import run_tests
-from ..github.pr_creator import PRCreator
+from shared.models import Fix, TestResults, ResolutionReport
+from shared.database_client import update_incident_status
+from sandbox.apply_fix import apply_fix
+from sandbox.test_runner import run_tests
+from github_integration.pr_creator import PRCreator
 
 from .fix_generator import (
     parse_ticket,

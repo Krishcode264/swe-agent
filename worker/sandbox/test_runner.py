@@ -2,7 +2,7 @@ import os
 import subprocess
 import logging
 from typing import Optional
-from ..shared.models import TestResults
+from shared.models import TestResults
 
 logger = logging.getLogger(__name__)
 
