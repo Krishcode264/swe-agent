@@ -19,9 +19,28 @@ def listen_for_tasks():
         _, task_data = result
         try:
             incident = json.loads(task_data)
-            incident_id = incident.get("incidentId")
+            # The backend puts 'task_id' in the payload, but the worker code sometimes expects 'incidentId'
+            incident_id = incident.get("incidentId") or incident.get("task_id")
             
+            if not incident_id:
+                logging.error(f"Task data missing both incidentId and task_id: {task_data}")
+                return
+
             logging.info(f"Processing new task for incident {incident_id}")
+            
+            # If the incident payload is minimal (only task_id/repo/status), fetch full details from backend
+            if "title" not in incident:
+                logging.info(f"Fetching full incident details for {incident_id} from backend API...")
+                try:
+                    response = requests.get(f"{BACKEND_API_URL}/incidents/{incident_id}")
+                    if response.ok:
+                        incident = response.json()
+                        logging.info(f"Successfully fetched full data for {incident_id}")
+                    else:
+                        logging.error(f"Failed to fetch incident {incident_id}: {response.status_code}")
+                except Exception as fetch_err:
+                    logging.error(f"Error fetching incident data: {fetch_err}")
+
             update_incident_status(incident_id, "running", "Agent worker picking up the task")
             
             # Trigger the agent workflow
