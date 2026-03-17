@@ -19,7 +19,7 @@ def listen_for_tasks():
         _, task_data = result
         try:
             incident = json.loads(task_data)
-            incident_id = incident.get("task_id") or incident.get("incidentId") or "unknown"
+            incident_id = incident.get("incidentId")
             
             logging.info(f"Processing new task for incident {incident_id}")
             update_incident_status(incident_id, "running", "Agent worker picking up the task")

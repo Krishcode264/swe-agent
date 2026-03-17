@@ -52,7 +52,7 @@ PARSE_TICKET_PROMPT = """You are analyzing a pre-structured software incident. M
 Respond ONLY in this exact JSON format with no extra text:
 {{
     "incident_id": "{incident_id}",
-    "service": "node-service OR python-service. Look closely: if you see 'npm', 'package.json', 'math.js', or '.js/.ts' files in the log, it's node-service. If you see 'pytest', 'pip', 'requirements.txt', or '.py' files, it's python-service.",
+    "service": "python-service OR node-service (pick based on repo and error log language)",
     "error_type": "runtime-crash | logic-bug | misconfiguration | missing-dependency | type-error | other",
     "error_message": "The single most important line from the error log above",
     "affected_file": "The file path most likely containing the bug, extracted from the error log stack trace",
@@ -84,9 +84,9 @@ Be precise. Cite specific line numbers and variable names.
 
 Respond in this exact JSON format:
 {{
-    "found_root_cause": boolean, // True ONLY if the ACTUAL FIX should be applied to THIS specific file. If the bug is in a different file (e.g. you're looking at a test but the bug is in a source file), set to false.
-    "root_cause_explanation": "Detailed explanation of what is wrong. If found_root_cause is false, explain why the bug belongs elsewhere.",
-    "suggested_next_files": ["math.js", "app/utils.js"] // List specific candidate files that likely contain the buggy implementation.
+    "found_root_cause": boolean, // True if this file contains the fixable bug
+    "root_cause_explanation": "Detailed explanation of the problem here, or why you are moving on",
+    "suggested_next_files": ["app/routes/db.js", "app/config/index.js"] // If found_root_cause is false, what files should we read next?
 }}
 """
 
@@ -119,8 +119,7 @@ Generate the MINIMUM code change to fix this bug. Your response must be in this 
 - The original_snippet must be an EXACT substring of the code above — character for character.
 - The new_snippet must be a drop-in replacement.
 - Do NOT add unrelated improvements, refactoring, or comments.
-- **CRITICAL**: If you are looking at a TEST file (e.g. `tests/math.test.js`) but the bug is in a SOURCE file (e.g. `math.js`), DO NOT attempt to fix the test file. Set `no_fix_needed: true` instead.
-- If the issue is purely environmental and cannot be patched with a code change, set `no_fix_needed: true`.
+- If the issue is purely environmental (e.g., missing database connection, missing node modules, incorrect Node.js version) and absolutely cannot be patched with a code change here, set "no_fix_needed": true, and leave new_snippet and original_snippet as empty strings. 
 """
 
 
@@ -148,7 +147,7 @@ Respond in the same JSON format:
     "no_fix_needed": boolean
 }}
 
-If the test failure was an environment failure (winerror, ENOENT, missing npm module outside your control), but you ALREADY identified the root cause in the code, do NOT set `no_fix_needed` to true. Instead, provide the fix again (or an improved one) so it can be committed. Only set `no_fix_needed`: true if you realize there is NO possible code fix for this incident.
+If the test failure was an environment failure (winerror, ENOENT, missing npm module outside your control), set `no_fix_needed`: true to skip making a code patch and exit gracefully.
 """
 
 

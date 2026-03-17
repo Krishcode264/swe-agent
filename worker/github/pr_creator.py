@@ -26,7 +26,7 @@ class PRCreator:
         branch_name: str,
         title: str,
         body: str,
-        base_branch: Optional[str] = None
+        base_branch: str = "main"
     ) -> Optional[str]:
         """
         Creates a PR on GitHub.
@@ -36,7 +36,7 @@ class PRCreator:
             branch_name: The head branch containing the fix.
             title: PR title.
             body: PR description (markdown).
-            base_branch: The target branch (defaults to repo's default branch).
+            base_branch: The target branch (default 'main').
             
         Returns:
             The PR HTML URL if successful, None otherwise.
@@ -47,24 +47,16 @@ class PRCreator:
             
         try:
             repo = self.github.get_repo(repo_name)
-            
-            # Use provided base_branch or repo's default branch
-            target_base = base_branch or repo.default_branch
-            logger.info(f"Targeting base branch: {target_base}")
-            
             pr = repo.create_pull(
                 title=title,
                 body=body,
                 head=branch_name,
-                base=target_base
+                base=base_branch
             )
             logger.info(f"PR created successfully: {pr.html_url}")
             return pr.html_url
         except Exception as e:
-            error_msg = str(e)
-            if hasattr(e, 'data'):
-                error_msg += f" - {e.data}"
-            logger.error(f"Failed to create PR in {repo_name}: {error_msg}")
+            logger.error(f"Failed to create PR in {repo_name}: {e}")
             return None
 
 # Helper instance

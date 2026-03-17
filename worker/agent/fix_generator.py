@@ -11,10 +11,9 @@ import json
 import logging
 from typing import Optional
 
-import requests
 from google import genai
 
-from config import GEMINI_API_KEYS, LLM_PROVIDER, OLLAMA_BASE_URL, OLLAMA_MODEL
+from config import GEMINI_API_KEY
 from shared.models import Fix
 from agent.prompts import (
     PARSE_TICKET_PROMPT,
@@ -25,117 +24,38 @@ from agent.prompts import (
 
 logger = logging.getLogger(__name__)
 
-# Pool of Gemini clients
-_clients: list[genai.Client] = []
-_current_client_index = 0
+# Initialize Gemini client
+_client: Optional[genai.Client] = None
 
-def _get_next_client() -> genai.Client:
-    """Rotate and return the next Gemini client from the pool."""
-    global _clients, _current_client_index
-    
-    if not _clients:
-        if not GEMINI_API_KEYS:
-            raise ValueError("GEMINI_API_KEYS is not set. Add it to your .env file.")
-        _clients = [genai.Client(api_key=key) for key in GEMINI_API_KEYS]
-    
-    client = _clients[_current_client_index]
-    _current_client_index = (_current_client_index + 1) % len(_clients)
-    return client
 
-import time
+def _get_client() -> genai.Client:
+    """Lazy-initialize the Gemini client."""
+    global _client
+    if _client is None:
+        if not GEMINI_API_KEY:
+            raise ValueError(
+                "GEMINI_API_KEY is not set. Add it to your .env file."
+            )
+        _client = genai.Client(api_key=GEMINI_API_KEY)
+    return _client
 
-def _call_ollama(prompt: str) -> str:
-    """Make a call to local Ollama instance."""
-    url = f"{OLLAMA_BASE_URL}/api/generate"
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json" if "JSON" in prompt.upper() else ""
-    }
-    
+
+def _call_gemini(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
+    """
+    Make a single Gemini API call and return the text response.
+    Centralized here so all LLM calls go through one function.
+    Using gemini-2.5-flash by default as it is fast and has high rate limits.
+    """
+    client = _get_client()
     try:
-        response = requests.post(url, json=payload, timeout=120)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("response", "")
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt
+        )
+        return response.text
     except Exception as e:
-        logger.error(f"Ollama API call failed: {e}")
-        raise e
-
-
-def _call_llm(prompt: str, model_name: str = "gemini-2.0-flash") -> str:
-    """
-    Unified entry point for LLM calls. 
-    Routes to either Gemini or Ollama based on configuration.
-    """
-    if LLM_PROVIDER.lower() == "ollama":
-        return _call_ollama(prompt)
-    else:
-        return _call_gemini(prompt, model_name)
-
-def _call_gemini(prompt: str, model_name: str = "gemini-2.0-flash") -> str:
-    """
-    Make a Gemini API call and return the text response.
-    Rotates through available API keys on 429 (Rate Limit) errors.
-    """
-    max_retries_per_key = 3
-    total_keys = len(GEMINI_API_KEYS) or 1
-    
-    last_exception = None
-    
-    # Try each key in the pool
-    for key_attempt in range(total_keys):
-        client = _get_next_client()
-        
-        for attempt in range(max_retries_per_key):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt
-                )
-                return response.text
-            except Exception as e:
-                last_exception = e
-                err_str = str(e)
-                
-                # If it's a rate limit error
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    # If we have multiple keys, switch immediately
-                    if total_keys > 1:
-                        key_idx = (_current_client_index - 1) % int(total_keys)
-                        logger.warning(f"Rate limit hit on key {key_idx}. Switching key...")
-                        break 
-                    else:
-                        # Only one key: wait and retry with backoff
-                        # Try to parse suggested wait time from error message
-                        wait_time = 15 # Default
-                        if "retry in" in err_str.lower():
-                            try:
-                                # Extract number after 'retry in'
-                                parts = err_str.lower().split("retry in")
-                                if len(parts) > 1:
-                                    wait_time = float(parts[1].strip().split()[0].replace('s', '')) + 1
-                            except:
-                                pass
-                        
-                        logger.warning(f"Rate limit hit on single key. Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries_per_key}...")
-                        time.sleep(wait_time)
-                        continue
-                
-                # For other errors, we might want to retry once on the same key
-                if attempt < max_retries_per_key - 1:
-                    logger.warning(f"Gemini error: {e}. Retrying same key in 2s...")
-                    time.sleep(2)
-                    continue
-                
-                # If we're here, this key is failing for non-rate-limit reasons
-                logger.error(f"Gemini API call failed on current key: {e}")
-                break # Try next key
-                
-    # If we exhausted all keys
-    logger.error(f"Gemini API call failed after trying all {total_keys} keys. Last error: {last_exception}")
-    raise last_exception if last_exception else Exception("Unknown error in _call_gemini")
+        logger.error(f"Gemini API call failed: {e}")
+        raise
 
 
 def parse_ticket(
@@ -173,16 +93,13 @@ def parse_ticket(
         description=description,
         error_log=error_log or "Not provided",
     )
-    response = _call_llm(prompt)
+    response = _call_gemini(prompt)
 
     try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
-            # Using start/end variables to satisfy linters that dislike inline slices sometimes
-            start_idx = 1
-            end_idx = -1
-            cleaned = "\n".join(lines[start_idx:end_idx])
+            cleaned = "\n".join(lines[1:-1])
         return json.loads(cleaned)
     except json.JSONDecodeError:
         logger.warning(f"Failed to parse ticket response as JSON, returning raw: {response[:200]}")
@@ -215,16 +132,13 @@ def analyze_code(
         file_path=file_path,
         file_content=file_content,
     )
-    response = _call_llm(prompt)
+    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
     
     try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
-            # Using variables for slices to avoid lint issues
-            s_idx = 1
-            e_idx = -1
-            cleaned = "\n".join(lines[s_idx:e_idx])
+            cleaned = "\n".join(lines[1:-1])
         if cleaned.startswith("json\n"):
             cleaned = cleaned[5:]
         return json.loads(cleaned)
@@ -252,15 +166,13 @@ def generate_fix(
         file_path=file_path,
         file_content=file_content,
     )
-    response = _call_llm(prompt)
+    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
 
     try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
-            s_idx = 1
-            e_idx = -1
-            cleaned = "\n".join(lines[s_idx:e_idx])
+            cleaned = "\n".join(lines[1:-1])
             
         # Optional: strip language tags if any from the backticks
         if cleaned.startswith("json\n"):
@@ -294,15 +206,13 @@ def generate_retry_fix(
         previous_attempts=previous_attempts,
         test_output=test_output,
     )
-    response = _call_llm(prompt)
+    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
 
     try:
         cleaned = response.strip()
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
-            s_idx = 1
-            e_idx = -1
-            cleaned = "\n".join(lines[s_idx:e_idx])
+            cleaned = "\n".join(lines[1:-1])
             
         if cleaned.startswith("json\n"):
             cleaned = cleaned[5:]

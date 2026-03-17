@@ -2,7 +2,7 @@ import os
 import re
 import shutil
 import logging
-from shared.models import Fix
+from ..shared.models import Fix
 
 logger = logging.getLogger(__name__)
 
