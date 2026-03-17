@@ -117,13 +117,14 @@ Generate the MINIMUM code change to fix this bug. Your response must be in this 
     "no_fix_needed": boolean
 }}
 
-## Rules
-- Change as few lines as possible.
-- Preserve the existing code style (indentation, naming conventions, etc.).
-- **STRICT MATCH**: The `original_snippet` must be an EXACT substring of the `file_content` provided above — character for character, including all spaces, tabs, and newlines.
-- **TARGET SOURCE**: Always try to fix the BUG, not the TEST. If `math.js` is wrong, fix `math.js`. Only fix `math.test.js` if the test case itself is mathematically or logically impossible.
+## CRITICAL Rules
+- **VERBATIM COPY**: The `original_snippet` must be a WORD-FOR-WORD, CHARACTER-FOR-CHARACTER copy from the `file_content` shown above. Do NOT paraphrase, retype, or reconstruct it from memory. Copy it exactly.
+- **MINIMAL SNIPPET**: Prefer the SHORTEST possible `original_snippet` that uniquely identifies the bug — ideally just 1-3 lines. Do NOT copy the whole function.
+- **INDENTATION**: Copy indentation exactly as it appears in the file. Do not add or remove spaces/tabs.
+- **TARGET SOURCE**: Fix the BUG in source code (e.g., `src/` files), NOT in test files. Only fix test files if the test itself is logically incorrect.
 - Do NOT add unrelated improvements, refactoring, or comments.
-- If the issue is purely environmental (e.g., missing database connection, missing node modules, incorrect Node.js version) and absolutely cannot be patched with a code change here, set "no_fix_needed": true, and leave new_snippet and original_snippet as empty strings. 
+- If the issue is purely environmental (e.g., missing database, missing node_modules outside your control) and CANNOT be patched with a code change, set `"no_fix_needed": true` with empty `original_snippet` and `new_snippet`.
+- If you already ran a command (like `npm install`) that fixed the issue, set `"no_fix_needed": true`.
 """
 
 

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { githubService } from '../services/githubService';
 import { incidentService } from '../services/incidentService';
 import { queueService } from '../services/queueService';
+import { llmService } from '../services/llmService';
 import { logger } from '../utils/logger';
 
 const router = Router();
@@ -80,6 +81,48 @@ router.post('/github', async (req: Request, res: Response): Promise<any> => {
   } catch (error) {
     logger.error('Error processing GitHub webhook', error);
     res.status(500).json({ error: 'Failed to process webhook' });
+  }
+});
+
+router.post('/jira', async (req: Request, res: Response): Promise<any> => {
+  try {
+    const payload = req.body;
+    const issue = payload.issue || {};
+    const labels: string[] = issue.fields?.labels || [];
+    
+    // Check if Jira issue is labeled with "trigger-agent"
+    if (!labels.includes('trigger-agent')) {
+      logger.info('Jira issue does not have "trigger-agent" label, ignoring', issue.key);
+      return res.status(200).send('ignore');
+    }
+
+    logger.info('Received valid labeling event from Jira', issue.key);
+
+    // Call LLM to parse payload into structured incident data
+    const parsedData = await llmService.parseJiraPayload(payload);
+    
+    // Enrich with additional metadata
+    const incidentData = {
+      ...parsedData,
+      source: 'jira',
+      status: 'queued' as any,
+      triggered_by: payload.user?.displayName || 'Jira Webhook',
+      timestamp: new Date()
+    };
+
+    // Create in DB
+    const incident = await incidentService.createIncident(incidentData);
+    
+    // Push to Redis Queue
+    await queueService.pushTask(incident);
+    
+    res.status(202).json({ 
+      message: 'Jira incident parsed and queued successfully', 
+      incidentId: incident.incidentId 
+    });
+  } catch (error) {
+    logger.error('Error processing Jira webhook', error);
+    res.status(500).json({ error: 'Failed to process Jira webhook' });
   }
 });
 

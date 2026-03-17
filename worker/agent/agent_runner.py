@@ -310,7 +310,7 @@ def process_incident(incident: dict) -> ResolutionReport:
 
         # ── Step 2: Clone/locate the repository ──
         update_incident_status(incident_id, "cloning", "Cloning repository")
-        from agent.repo_manager import clone_repo, create_branch, commit_fix, push_branch, cleanup_repo
+        from agent.repo_manager import clone_repo, create_branch, commit_fix, commit_all_changes, has_uncommitted_changes, push_branch, cleanup_repo
 
         repo_path = clone_repo(repo_url or "https://github.com/Rezinix-AI/shopstack-platform.git")
         service_path = _detect_service_root(repo_path, service)
@@ -429,16 +429,35 @@ def process_incident(incident: dict) -> ResolutionReport:
         update_incident_status(incident_id, "reporting", "Generating resolution report")
         report.report_markdown = _generate_report_markdown(report)
 
-        # ── Step 7: Create PR (if any fix was applied) ──
-        if report.fix and not report.fix.no_fix_needed:
+        # ── Step 7: Create PR ──
+        # Create a PR if:
+        #   (a) A file was explicitly patched via apply_fix(), OR
+        #   (b) A command (e.g. npm install) modified files that git can detect
+        has_file_patch = report.fix and not report.fix.no_fix_needed
+        has_git_changes = has_uncommitted_changes(repo_path)
+
+        if has_file_patch or has_git_changes:
             logger.info("A fix was applied. Proceeding with PR creation.")
             try:
-                # Use real PR Creator
                 pr_creator = PRCreator()
-                # Commit changes first (pass repo_path, affected_file_path, incident_id)
-                commit_fix(repo_path, target_file, incident_id)
+
+                if has_file_patch:
+                    # Commit only the patched file
+                    commit_fix(repo_path, target_file, incident_id)
+                else:
+                    # Commit all side-effect changes (package.json, lockfiles, etc.)
+                    logger.info("Committing all uncommitted changes (dependency/config updates)...")
+                    commit_all_changes(
+                        repo_path,
+                        incident_id,
+                        message=(
+                            f"fix({incident_id}): apply agent-generated fix\n\n"
+                            f"Automated fix by swe-agent: {report.fix.explanation if report.fix else 'dependency/config update'}"
+                        )
+                    )
+
                 push_branch(repo_path, branch_name)
-                
+
                 pr_url = pr_creator.create_pull_request(
                     repo_name=repo_url.split("github.com/")[-1].replace(".git", ""),
                     branch_name=branch_name,
@@ -447,13 +466,14 @@ def process_incident(incident: dict) -> ResolutionReport:
                 )
                 report.pr_url = pr_url
                 update_incident_status(incident_id, "pr_created", f"PR created: {pr_url}")
-                # Final Status
                 update_incident_status(incident_id, "completed", "Incident resolved successfully with PR.")
             except Exception as e:
                 logger.error(f"Failed to create PR: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
                 update_incident_status(incident_id, "pr_failed", f"PR creation failed: {e}")
+        else:
+            logger.info("No code changes detected — skipping PR creation.")
 
         logger.info(f"=== Finished agent workflow for {incident_id} (confidence: {report.confidence_score}) ===")
         return report
