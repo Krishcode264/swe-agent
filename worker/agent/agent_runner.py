@@ -17,11 +17,11 @@ import logging
 import os
 from typing import Optional
 
-from ..shared.models import Fix, TestResults, ResolutionReport
-from ..shared.database_client import update_incident_status
-from ..sandbox.apply_fix import apply_fix
-from ..sandbox.test_runner import run_tests
-from ..github.pr_creator import PRCreator
+from shared.models import Fix, TestResults, ResolutionReport
+from shared.database_client import update_incident_status
+from sandbox.apply_fix import apply_fix
+from sandbox.test_runner import run_tests
+from github_integration.pr_creator import PRCreator
 
 from .fix_generator import (
     parse_ticket,
@@ -260,7 +260,7 @@ def process_incident(incident: dict) -> ResolutionReport:
         A fully populated ResolutionReport.
     """
     # Extract incident ID
-    incident_id = incident.get("incidentId") or incident.get("id", "unknown")
+    incident_id = incident.get("incidentId") or incident.get("task_id") or incident.get("id", "unknown")
     repo_url = incident.get("repository", "")
     ticket_text = json.dumps(incident, indent=2)
 
