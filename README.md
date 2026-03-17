@@ -151,3 +151,19 @@ root
 
 3.  **Monitor**:
     Visit the [Dashboard](http://localhost:3000) to watch the agent in real-time.
+
+---
+
+## 🏗️ Port Configuration (Local)
+
+| Service | Port | Description |
+| :--- | :--- | :--- |
+| **Dashboard UI** | `3000` | React Monitoring Interface |
+| **Dummy App (FE)** | `3001` | Buggy Frontend for Demo |
+| **Backend API** | `4000` | Orchestrator & Webhook Listener |
+| **Dummy Backend** | `5000` | Incident Simulator & Buggy API |
+
+To trigger the **Local Demo Incident** (INC-004), run:
+```bash
+curl -X POST http://localhost:5000/api/simulate-incident
+```

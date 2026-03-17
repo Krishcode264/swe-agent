@@ -30,6 +30,7 @@ class TestResults:
     passed: bool             # Did all tests pass?
     output: str              # Full stdout/stderr captured from the test run
     tests_added: List[str] = field(default_factory=list)  # Names of any new tests generated
+    no_tests_found: bool = False # Set True if the repo has no identifiable test suite
 
 
 @dataclass

@@ -29,16 +29,20 @@ CLONE_BASE_DIR = os.path.join(tempfile.gettempdir(), "swe_agent_repos")
 def _build_auth_url(repo_url: str) -> str:
     """
     Inject GITHUB_TOKEN into the clone URL for private/authenticated repos.
+    Idempotent: only replaces https:// if it hasn't already been replaced by a token.
 
     Transforms:
       https://github.com/org/repo.git
     Into:
       https://<token>@github.com/org/repo.git
-
-    If no token is set, returns the original URL (still works for public repos).
     """
-    if GITHUB_TOKEN and "github.com" in repo_url:
-        return repo_url.replace("https://", f"https://{GITHUB_TOKEN}@")
+    token = GITHUB_TOKEN.strip() if GITHUB_TOKEN else ""
+    
+    if token and "github.com" in repo_url:
+        # Avoid duplicate injection: only replace if it's the standard https://
+        if repo_url.startswith("https://") and "@github.com" not in repo_url:
+            return repo_url.replace("https://", f"https://{token}@")
+            
     return repo_url
 
 
@@ -67,14 +71,26 @@ def clone_repo(repo_url: str) -> str:
 
     # If already cloned from a previous run, just pull latest instead of re-cloning
     if os.path.isdir(clone_path):
-        logger.info(f"Repo already exists at {clone_path}, pulling latest...")
+        logger.info(f"Repo folder exists at {clone_path}, verifying origin URL...")
         try:
             existing_repo = Repo(clone_path)
-            existing_repo.remotes.origin.pull()
-            logger.info(f"Pulled latest changes for {repo_name}")
-            return clone_path
+            # Normalize URLs for comparison (strip trailing .git and slashes)
+            def normalize(url): return url.rstrip("/").rstrip(".git").lower()
+            
+            # Check if existing origin matches the requested one
+            current_origin = normalize(existing_repo.remotes.origin.url)
+            requested_origin = normalize(repo_url)
+            
+            if current_origin != requested_origin:
+                logger.warning(f"URL mismatch: {current_origin} != {requested_origin}. Deleting stale clone.")
+                shutil.rmtree(clone_path, ignore_errors=True)
+            else:
+                logger.info(f"Origin match: {current_origin}. Pulling latest...")
+                existing_repo.remotes.origin.pull()
+                logger.info(f"Pulled latest changes for {repo_name}")
+                return clone_path
         except Exception as e:
-            logger.warning(f"Pull failed ({e}), deleting and re-cloning...")
+            logger.warning(f"Verification/pull failed ({e}), deleting and re-cloning...")
             shutil.rmtree(clone_path, ignore_errors=True)
 
     # Fresh clone — depth=1 is a shallow clone (much faster, only latest commit)
@@ -166,15 +182,29 @@ def push_branch(repo_path: str, branch_name: str) -> None:
         origin = repo.remotes.origin
 
         # Re-inject auth token into remote URL before pushing
-        # (GitPython strips credential helpers in some envs)
         auth_url = _build_auth_url(origin.url)
         origin.set_url(auth_url)
 
-        origin.push(refspec=f"{branch_name}:{branch_name}")
-        logger.info(f"Pushed branch {branch_name} to remote.")
+        logger.info(f"Pushing branch {branch_name} to origin...")
+        # Use explicit refspec to avoid ambiguity
+        info = origin.push(refspec=f"{branch_name}:{branch_name}", force=True)
+        
+        # Check for errors in push info
+        for item in info:
+            if item.flags & item.REJECTED or item.flags & item.REMOTE_REJECTED:
+                raise GitCommandError("push", f"Rejected: {item.summary}")
+                
+        logger.info(f"Successfully pushed branch {branch_name} to remote.")
     except GitCommandError as e:
         logger.error(f"Failed to push branch {branch_name}: {e}")
-        raise
+        # Fallback: try raw git command if GitPython fails
+        try:
+            logger.info("Retrying push with raw git command...")
+            repo.git.push("origin", f"{branch_name}:{branch_name}", "-f")
+            logger.info("Raw git push succeeded.")
+        except Exception as raw_e:
+            logger.error(f"Raw git push also failed: {raw_e}")
+            raise e
 
 
 def cleanup_repo(repo_path: str) -> None:

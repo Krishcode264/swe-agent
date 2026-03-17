@@ -17,11 +17,12 @@ import logging
 import os
 from typing import Optional
 
-from ..shared.models import Fix, TestResults, ResolutionReport
-from ..shared.database_client import update_incident_status
-from ..sandbox.apply_fix import apply_fix
-from ..sandbox.test_runner import run_tests
-from ..github.pr_creator import PRCreator
+from git import Repo
+from shared.models import Fix, TestResults, ResolutionReport
+from shared.database_client import update_incident_status
+from sandbox.apply_fix import apply_fix
+from sandbox.test_runner import run_tests
+from github_api.pr_creator import PRCreator
 
 from .fix_generator import (
     parse_ticket,
@@ -41,6 +42,28 @@ from .fix_generator import _call_gemini
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
+
+
+def _detect_service_type(service_path: str) -> str:
+    """Detect if the service is 'python' or 'node' based on signature files."""
+    if os.path.exists(os.path.join(service_path, "package.json")):
+        return "node"
+    if os.path.exists(os.path.join(service_path, "requirements.txt")) or \
+       os.path.exists(os.path.join(service_path, "pyproject.toml")) or \
+       os.path.exists(os.path.join(service_path, "setup.py")):
+        return "python"
+    
+    # Check for file extensions as fallback
+    try:
+        files = list_files(service_path)
+        if any(f.endswith(".js") or f.endswith(".ts") for f in files):
+            return "node"
+        if any(f.endswith(".py") for f in files):
+            return "python"
+    except:
+        pass
+        
+    return "unknown"
 
 
 def _detect_service_root(repo_path: str, service_name: str) -> str:
@@ -140,12 +163,13 @@ def _investigate_codebase(
         logger.warning(f"Could not find any relevant file to investigate in {service_path}. Returning defaults.")
         return "No relevant file found", "", ""
 
-    # Step 4: Multi-File ReAct Loop (Capped at 3 files)
+    # Step 4: Multi-File ReAct Loop (Capped at 7 files)
     root_cause = "Could not find root cause."
     target_file = files_to_read[0]
     file_content = ""
+    investigation_depth = 7
 
-    for _ in range(3):
+    for _ in range(investigation_depth):
         if not files_to_read:
             break
             
@@ -154,7 +178,7 @@ def _investigate_codebase(
             continue
 
         try:
-            file_content = read_file(current_file)
+            current_content = read_file(current_file)
             files_analyzed.append(current_file)
             if report:
                 report.files_analyzed.append(current_file)
@@ -167,24 +191,27 @@ def _investigate_codebase(
                 error_message=error_message,
                 hypothesis=hypothesis,
                 file_path=current_file,
-                file_content=file_content,
+                file_content=current_content,
             )
 
-            root_cause = analysis.get("root_cause_explanation", "")
-            target_file = current_file
-            
             if analysis.get("found_root_cause"):
-                logger.info("Root cause found.")
+                logger.info(f"Root cause confirmed in {current_file}")
+                root_cause = analysis.get("root_cause_explanation", "")
+                target_file = current_file
+                file_content = current_content
                 break
             else:
                 next_files = analysis.get("suggested_next_files", [])
-                logger.info(f"Root cause not in {current_file}, LLM suggested: {next_files}")
+                logger.info(f"Root cause NOT in {current_file}. LLM suggested skipping to: {next_files}")
                 for nf in next_files:
+                    # Clean the suggested path
+                    nf_clean = nf.strip().lstrip("./")
                     for f in all_files:
-                        if nf in f or os.path.basename(nf) in f:
+                        if nf_clean in f or os.path.basename(nf_clean) == os.path.basename(f):
                             matched = os.path.join(service_path, f)
                             if matched not in files_to_read and matched not in files_analyzed:
-                                files_to_read.append(matched)
+                                logger.debug(f"Adding suggested file to queue: {matched}")
+                                files_to_read.insert(0, matched) # Prioritize suggestions
                                 
         except Exception as e:
             logger.warning(f"Failed to investigate {current_file}: {e}")
@@ -223,27 +250,40 @@ def _run_tests_in_service(service_path: str, service_type: str) -> TestResults:
 
 
 def _generate_report_markdown(report: ResolutionReport) -> str:
-    """Generate a markdown report using Claude."""
-    try:
-        prompt = REPORT_PROMPT.format(
-            incident_id=report.incident_id,
-            ticket_text=report.ticket_text,
-            hypothesis=report.hypothesis,
-            root_cause=report.root_cause,
-            file_path=report.fix.file_path if report.fix else "N/A",
-            explanation=report.fix.explanation if report.fix else "N/A",
-            original_snippet=report.fix.original_snippet if report.fix else "N/A",
-            new_snippet=report.fix.new_snippet if report.fix else "N/A",
-            tests_passed=report.test_results.passed if report.test_results else "Not run",
-            test_output=report.test_results.output[:2000] if report.test_results else "N/A",
-            retry_count=report.retry_count,
-            files_analyzed=", ".join(report.files_analyzed),
-            env_error_detected=report.env_error_detected,
-        )
-        return _call_gemini(prompt)
-    except Exception as e:
-        logger.error(f"Failed to generate report: {e}")
-        return f"# Resolution Report — {report.incident_id}\n\nReport generation failed: {e}"
+    """Generate a simple markdown report without using LLM to save tokens."""
+    if report.test_results:
+        if report.test_results.passed:
+            status = "PASSED"
+        elif report.test_results.no_tests_found:
+            status = "MISSING (No tests found in repo)"
+        else:
+            status = "FAILED"
+    else:
+        status = "NOT RUN"
+
+    report_md = f"""# Resolution Report — {report.incident_id}
+
+## Status: {status}
+**Hypothesis:** {report.hypothesis}
+**Root Cause:** {report.root_cause}
+
+## Fix Details
+**File:** `{report.fix.file_path if report.fix else "N/A"}`
+**Explanation:** {report.fix.explanation if report.fix else "N/A"}
+
+### Code Change
+```diff
+{report.fix.original_snippet if report.fix else "N/A"}
+---
+{report.fix.new_snippet if report.fix else "N/A"}
+```
+
+## Verification
+**Tests Passed:** {status}
+**Retry Count:** {report.retry_count}
+**Files Analyzed:** {", ".join(report.files_analyzed)}
+"""
+    return report_md
 
 
 def process_incident(incident: dict) -> ResolutionReport:
@@ -260,7 +300,7 @@ def process_incident(incident: dict) -> ResolutionReport:
         A fully populated ResolutionReport.
     """
     # Extract incident ID
-    incident_id = incident.get("incidentId") or incident.get("id", "unknown")
+    incident_id = incident.get("task_id") or incident.get("incidentId") or "unknown"
     repo_url = incident.get("repository", "")
     ticket_text = json.dumps(incident, indent=2)
 
@@ -299,8 +339,9 @@ def process_incident(incident: dict) -> ResolutionReport:
         # ── Step 2: Clone/locate the repository ──
         update_incident_status(incident_id, "cloning", "Cloning repository")
         from agent.repo_manager import clone_repo, create_branch, commit_fix, push_branch, cleanup_repo
+        from config import TARGET_REPO
 
-        repo_path = clone_repo(repo_url or "https://github.com/Rezinix-AI/shopstack-platform.git")
+        repo_path = clone_repo(repo_url or TARGET_REPO)
         service_path = _detect_service_root(repo_path, service)
         # Use issue_number for branch name if available (e.g. fix/42), else use incident_id
         issue_number = incident.get("issue_number")
@@ -319,12 +360,27 @@ def process_incident(incident: dict) -> ResolutionReport:
             report=report,
         )
         report.root_cause = root_cause
-        # No need to manually append target_file since _investigate_codebase now handles reporting analyzed files
+        
+        # ── Step 3.5: Fail fast if root cause not found ──
+        if "Could not find root cause" in root_cause or not target_file:
+            logger.error(f"Agent could not identify root cause for {incident_id} after analyzing {len(report.files_analyzed)} files.")
+            update_incident_status(incident_id, "failed", "Could not identify root cause in codebase")
+            report.confidence_score = 0
+            return report
 
         # ── Step 4: Generate and apply fix (with retry loop) ──
         fix = None
         test_results = None
-        service_type = "python" if service.lower().startswith("python") else "node"
+        
+        # Detect actual service type from code, overriding the ticket parse if necessary
+        detected_type = _detect_service_type(service_path)
+        if detected_type != "unknown":
+            service_type = detected_type
+            logger.info(f"Detected service type: {service_type}")
+        else:
+            service_type = "python" if service.lower().startswith("python") else "node"
+            logger.warning(f"Could not detect service type from files, falling back to: {service_type}")
+            
         previous_attempts_history = ""
 
         for attempt in range(1, MAX_RETRIES + 2):  # +2 because range is exclusive and attempt starts at 1
@@ -368,8 +424,12 @@ def process_incident(incident: dict) -> ResolutionReport:
                 continue
 
             if fix.no_fix_needed:
-                logger.info(f"Fix generation stated no fix needed. Stopping retries.")
-                break
+                if attempt == 1:
+                    logger.info(f"Fix generation stated no fix needed on attempt 1. Stopping.")
+                    break
+                else:
+                    logger.warning(f"Fix generation returned no_fix_needed during retry. This usually means an environment error occurred. Keeping previous fix if any.")
+                    break
 
             update_incident_status(incident_id, "fix_applied", "Fix applied, running tests")
 
@@ -378,11 +438,11 @@ def process_incident(incident: dict) -> ResolutionReport:
             report.test_results = test_results
             previous_attempts_history += f"Test Output:\n{test_results.output[:1000]}\n" + "-" * 40 + "\n"
 
-            env_error_keywords = ["WinError 2", "ENOENT", "command not found", "MODULE_NOT_FOUND"]
+            env_error_keywords = ["WinError 2", "ENOENT", "command not found", "MODULE_NOT_FOUND", "ModuleNotFoundError", "ImportError"]
             if any(kw in test_results.output for kw in env_error_keywords):
-                logger.warning("Environment error detected — skipping retries.")
-                fix.no_fix_needed = True
-                fix.explanation = f"Skipped: environment error ({test_results.output[:120]})"
+                logger.warning(f"Environment error detected on attempt {attempt} — stopping verification.")
+                # Don't set no_fix_needed = True if we already have a fix that we want to keep
+                # Just mark that env error happened
                 report.env_error_detected = True
                 break
 
@@ -413,17 +473,38 @@ def process_incident(incident: dict) -> ResolutionReport:
         update_incident_status(incident_id, "reporting", "Generating resolution report")
         report.report_markdown = _generate_report_markdown(report)
 
-        # ── Step 7: Create PR (if tests passed) ──
-        if test_results and test_results.passed:
+        # ── Step 7: Create PR (if tests passed OR if tests/env are broken but fix was applied) ──
+        should_create_pr = False
+        if test_results:
+            if test_results.passed:
+                should_create_pr = True
+            elif (test_results.no_tests_found or report.env_error_detected) and report.fix and not report.fix.no_fix_needed:
+                logger.info(f"Proceeding to PR for {incident_id} despite test/env issues, as a logical fix was applied.")
+                should_create_pr = True
+            elif not test_results.passed and report.fix and not report.fix.no_fix_needed:
+                # If tests failed but we have a fix, we might still want a PR if confidence is high enough
+                # Or if we want the user to review it anyway
+                logger.info(f"Tests failed, but a fix was applied. Creating PR for review.")
+                should_create_pr = True
+
+        if should_create_pr:
             try:
                 # Use real PR Creator
                 pr_creator = PRCreator()
                 # Commit changes first (pass repo_path, affected_file_path, incident_id)
                 commit_fix(repo_path, target_file, incident_id)
+                
+                # PUSH the branch to remote before creating PR
                 push_branch(repo_path, branch_name)
                 
+                # Get the actual repo name from the remote URL to ensure it's not stale/wrong
+                repo_obj = Repo(repo_path)
+                remote_url = repo_obj.remotes.origin.url
+                # Extract 'owner/repo' from 'https://github.com/owner/repo.git'
+                actual_repo_name = remote_url.split("github.com/")[-1].replace(".git", "")
+                
                 pr_url = pr_creator.create_pull_request(
-                    repo_name=repo_url.split("github.com/")[-1].replace(".git", ""),
+                    repo_name=actual_repo_name,
                     branch_name=branch_name,
                     title=f"Fix {incident_id}: {incident.get('title')}",
                     body=report.report_markdown

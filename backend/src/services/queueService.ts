@@ -13,6 +13,9 @@ export const queueService = {
         agent: incident.assigned_agent || 'swe-agent',
         repo: incident.repository,
         issue_number: incident.issue_number,
+        title: incident.title,
+        description: incident.description,
+        error_log: incident.error_log,
         status: incident.status || 'queued'
       };
       const taskPayload = JSON.stringify(agentTask);

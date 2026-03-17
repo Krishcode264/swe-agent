@@ -14,7 +14,7 @@ router.post('/github', async (req: Request, res: Response): Promise<any> => {
     }
 
     const payload = req.body;
-    
+
     if (payload.action !== 'labeled' || payload.label?.name !== 'assign to agent') {
       return res.status(200).send('ignore');
     }
