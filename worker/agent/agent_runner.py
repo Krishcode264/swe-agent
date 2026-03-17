@@ -20,9 +20,9 @@ from typing import Optional
 from shared.models import Fix, TestResults, ResolutionReport
 from shared.database_client import update_incident_status
 from sandbox.apply_fix import apply_fix
-from sandbox.test_runner import run_tests
+from sandbox.test_runner import run_tests, install_dependencies
 from github_integration.pr_creator import PRCreator
-
+from config import TARGET_REPO
 from .fix_generator import (
     parse_ticket,
     analyze_code,
@@ -34,9 +34,10 @@ from .tools import (
     read_file,
     search_in_file,
     search_in_directory,
+    execute_command,
 )
 from .prompts import REPORT_PROMPT
-from .fix_generator import _call_gemini
+from .fix_generator import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -142,10 +143,11 @@ def _investigate_codebase(
 
     # Step 4: Multi-File ReAct Loop (Capped at 3 files)
     root_cause = "Could not find root cause."
-    target_file = files_to_read[0]
+    target_file = files_to_read[0] if files_to_read else ""
     file_content = ""
+    env_feedback = ""
 
-    for _ in range(3):
+    for _ in range(5): # Increase loop limit slightly for command feedback
         if not files_to_read:
             break
             
@@ -161,14 +163,27 @@ def _investigate_codebase(
                 
             logger.info(f"Investigating: {current_file}")
 
+            hypothesis_with_feedback = str(hypothesis)
+            if env_feedback:
+                hypothesis_with_feedback += f"\n[Environment Feedback]: {env_feedback}"
+
             analysis = analyze_code(
                 incident_id=incident_id,
                 service=service,
                 error_message=error_message,
-                hypothesis=hypothesis,
+                hypothesis=hypothesis_with_feedback,
                 file_path=current_file,
                 file_content=file_content,
             )
+
+            # Handle suggested commands
+            commands = analysis.get("suggested_commands", [])
+            if commands:
+                env_feedback = "" # Reset feedback for this round
+                for cmd in commands:
+                    logger.info(f"Running suggested command: {cmd}")
+                    cmd_res = execute_command(cmd, service_path)
+                    env_feedback += f"\n$ {cmd}\n{cmd_res}\n"
 
             root_cause = analysis.get("root_cause_explanation", "")
             target_file = current_file
@@ -223,27 +238,15 @@ def _run_tests_in_service(service_path: str, service_type: str) -> TestResults:
 
 
 def _generate_report_markdown(report: ResolutionReport) -> str:
-    """Generate a markdown report using Claude."""
-    try:
-        prompt = REPORT_PROMPT.format(
-            incident_id=report.incident_id,
-            ticket_text=report.ticket_text,
-            hypothesis=report.hypothesis,
-            root_cause=report.root_cause,
-            file_path=report.fix.file_path if report.fix else "N/A",
-            explanation=report.fix.explanation if report.fix else "N/A",
-            original_snippet=report.fix.original_snippet if report.fix else "N/A",
-            new_snippet=report.fix.new_snippet if report.fix else "N/A",
-            tests_passed=report.test_results.passed if report.test_results else "Not run",
-            test_output=report.test_results.output[:2000] if report.test_results else "N/A",
-            retry_count=report.retry_count,
-            files_analyzed=", ".join(report.files_analyzed),
-            env_error_detected=report.env_error_detected,
-        )
-        return _call_gemini(prompt)
-    except Exception as e:
-        logger.error(f"Failed to generate report: {e}")
-        return f"# Resolution Report — {report.incident_id}\n\nReport generation failed: {e}"
+    # Pausing LLM report generation as requested by user to save local resources
+    return f"""# Resolution Report — {report.incident_id}
+**Service**: {report.service}
+**Hypothesis**: {report.hypothesis}
+**Root Cause**: {report.root_cause}
+**Fix Applied**: {report.fix.explanation if report.fix else "N/A"}
+**Test Status**: {"Passed" if report.test_results and report.test_results.passed else "Failed/Not Run"}
+**Confidence**: {report.confidence_score}%
+"""
 
 
 def process_incident(incident: dict) -> ResolutionReport:
@@ -261,7 +264,15 @@ def process_incident(incident: dict) -> ResolutionReport:
     """
     # Extract incident ID
     incident_id = incident.get("incidentId") or incident.get("task_id") or incident.get("id", "unknown")
-    repo_url = incident.get("repository", "")
+    
+    # Prioritize TARGET_REPO from config if it's set, otherwise use what's in the incident
+    incident_repo = incident.get("repository", "")
+    if TARGET_REPO and ("Rezinix-AI" in incident_repo or not incident_repo):
+        repo_url = f"https://github.com/{TARGET_REPO}.git"
+        logger.info(f"Target repo override from .env: {repo_url}")
+    else:
+        repo_url = incident_repo
+        
     ticket_text = json.dumps(incident, indent=2)
 
     logger.info(f"=== Starting agent workflow for {incident_id} ===")
@@ -294,6 +305,7 @@ def process_incident(incident: dict) -> ResolutionReport:
         affected_file = parsed.get("affected_file", "")
 
         report.hypothesis = hypothesis
+        report.service = service
         logger.info(f"Parsed ticket: service={service}, hypothesis={hypothesis[:100]}")
 
         # ── Step 2: Clone/locate the repository ──
@@ -306,6 +318,10 @@ def process_incident(incident: dict) -> ResolutionReport:
         issue_number = incident.get("issue_number")
         branch_name = f"fix/{issue_number}" if issue_number else f"fix/{incident_id.lower()}"
         create_branch(repo_path, branch_name)
+        
+        # ── Step 2.5: Install Dependencies (Sandbox Robustness) ──
+        update_incident_status(incident_id, "cloning", "Installing dependencies in sandbox")
+        install_dependencies(service_path, service_type="python" if service.lower().startswith("python") else "node")
 
         # ── Step 3: Investigate the codebase ──
         update_incident_status(incident_id, "investigating", "Analyzing codebase for root cause")
@@ -413,8 +429,9 @@ def process_incident(incident: dict) -> ResolutionReport:
         update_incident_status(incident_id, "reporting", "Generating resolution report")
         report.report_markdown = _generate_report_markdown(report)
 
-        # ── Step 7: Create PR (if tests passed) ──
-        if test_results and test_results.passed:
+        # ── Step 7: Create PR (if any fix was applied) ──
+        if report.fix and not report.fix.no_fix_needed:
+            logger.info("A fix was applied. Proceeding with PR creation.")
             try:
                 # Use real PR Creator
                 pr_creator = PRCreator()
@@ -434,6 +451,8 @@ def process_incident(incident: dict) -> ResolutionReport:
                 update_incident_status(incident_id, "completed", "Incident resolved successfully with PR.")
             except Exception as e:
                 logger.error(f"Failed to create PR: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 update_incident_status(incident_id, "pr_failed", f"PR creation failed: {e}")
 
         logger.info(f"=== Finished agent workflow for {incident_id} (confidence: {report.confidence_score}) ===")

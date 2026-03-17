@@ -49,6 +49,7 @@ class ResolutionReport:
     hypothesis: str                         # Agent's initial hypothesis before confirming
     root_cause: str                         # Confirmed root cause after analysis
     files_analyzed: List[str]               # All file paths the agent read during investigation
+    service: str = "unknown"                # The affected service name
     fix: Optional[Fix] = None               # The applied fix (None if agent couldn't generate one)
     test_results: Optional[TestResults] = None  # None if tests haven't run yet
     confidence_score: int = 0               # 0-100, agent's self-assessed certainty

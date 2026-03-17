@@ -9,11 +9,13 @@ This module handles:
 
 import json
 import logging
+import re
 from typing import Optional
 
 from google import genai
+import requests
 
-from config import GEMINI_API_KEY
+from config import GEMINI_API_KEY, LLM_PROVIDER, OLLAMA_BASE_URL, OLLAMA_MODEL
 from shared.models import Fix
 from agent.prompts import (
     PARSE_TICKET_PROMPT,
@@ -40,11 +42,19 @@ def _get_client() -> genai.Client:
     return _client
 
 
-def _call_gemini(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
+def call_llm(prompt: str, model_name: Optional[str] = None) -> str:
+    """
+    Dispatch LLM calls based on LLM_PROVIDER configuration.
+    """
+    if LLM_PROVIDER == "ollama":
+        return _call_ollama(prompt, model_name or OLLAMA_MODEL)
+    else:
+        return _call_gemini(prompt, model_name or "gemini-2.5-flash")
+
+
+def _call_gemini(prompt: str, model_name: str) -> str:
     """
     Make a single Gemini API call and return the text response.
-    Centralized here so all LLM calls go through one function.
-    Using gemini-2.5-flash by default as it is fast and has high rate limits.
     """
     client = _get_client()
     try:
@@ -56,6 +66,100 @@ def _call_gemini(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
     except Exception as e:
         logger.error(f"Gemini API call failed: {e}")
         raise
+
+
+def _call_ollama(prompt: str, model_name: str) -> str:
+    """
+    Make a single Ollama API call and return the text response.
+    """
+    logger.info(f"Calling Ollama ({model_name}) at {OLLAMA_BASE_URL}")
+    try:
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model": model_name,
+                "prompt": prompt,
+                "stream": False,
+            },
+            timeout=120
+        )
+        response.raise_for_status()
+        return response.json().get("response", "")
+    except Exception as e:
+        logger.error(f"Ollama API call failed: {e}")
+        raise
+
+
+def _sanitize_json_string(text: str) -> str:
+    """
+    Pre-process LLM output to fix common malformed JSON patterns:
+    - Nested double quotes inside string values (e.g. f-strings with {data["key"]})
+    - Single quotes used instead of double quotes for keys
+    """
+    # Remove markdown code fences
+    text = re.sub(r'```(?:json)?\s*', '', text)
+    text = re.sub(r'```\s*', '', text)
+    text = text.strip()
+
+    # Fix the most common Ollama glitch: f-string nested double quotes inside JSON strings
+    # e.g. "new_snippet": "... f'text {data["key"]}' ..."
+    # Strategy: find string values and replace inner double quotes with single quotes
+    def fix_string_value(m):
+        inner = m.group(1)
+        # Replace double quotes that appear INSIDE the string value (not at boundaries)
+        inner = inner.replace('\\"', '__ESCAPED_QUOTE__')
+        # Replace unescaped inner double quotes with single quotes
+        parts = inner.split('"')
+        # Rejoin without trying to parse - just escape them
+        fixed = '\\"'.join(parts)
+        fixed = fixed.replace('__ESCAPED_QUOTE__', '\\"')
+        return f'"{fixed}"'
+
+    return text
+
+
+def _extract_json(text: str) -> dict:
+    """
+    Robust JSON extraction from LLM responses.
+    Handles text before/after JSON, markdown blocks, and common formatting quirks.
+    """
+    cleaned = _sanitize_json_string(text)
+
+    # 1. Try to find content between triple backticks (already stripped above, try again)
+    try:
+        match = re.search(r'(\{.*\})', cleaned, re.DOTALL)
+        if match:
+            candidate = match.group(1).strip()
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+    except Exception:
+        pass
+
+    # 2. Try direct parse on the full cleaned text
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Field-by-field regex fallback — handles responses where JSON is near-valid
+    # but has internal quote issues (common with local LLMs like Ollama)
+    result = {}
+    # Match: "key": "value" or "key": true/false/null or "key": number
+    scalar_pattern = re.findall(r'"(\w+)"\s*:\s*"((?:[^"\\]|\\.)*)"\s*[,}]', cleaned, re.DOTALL)
+    for k, v in scalar_pattern:
+        result[k] = v
+    bool_pattern = re.findall(r'"(\w+)"\s*:\s*(true|false|null)\s*[,}]', cleaned)
+    for k, v in bool_pattern:
+        result[k] = {"true": True, "false": False, "null": None}[v]
+
+    if result:
+        logger.warning(f"Used field-by-field fallback extraction. Got keys: {list(result.keys())}")
+        return result
+
+    logger.error(f"Failed to extract JSON from: {text[:500]}...")
+    raise json.JSONDecodeError("Could not extract JSON", text, 0)
 
 
 def parse_ticket(
@@ -93,15 +197,11 @@ def parse_ticket(
         description=description,
         error_log=error_log or "Not provided",
     )
-    response = _call_gemini(prompt)
+    response = call_llm(prompt)
 
     try:
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            cleaned = "\n".join(lines[1:-1])
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
+        return _extract_json(response)
+    except Exception:
         logger.warning(f"Failed to parse ticket response as JSON, returning raw: {response[:200]}")
         return {
             "incident_id": incident_id,
@@ -132,17 +232,11 @@ def analyze_code(
         file_path=file_path,
         file_content=file_content,
     )
-    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
+    response = call_llm(prompt)
     
     try:
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            cleaned = "\n".join(lines[1:-1])
-        if cleaned.startswith("json\n"):
-            cleaned = cleaned[5:]
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
+        return _extract_json(response)
+    except Exception:
         logger.warning(f"Failed to parse analyze_code response as JSON. Raw: {response[:200]}")
         return {
             "found_root_cause": True, # Assume true as a fallback
@@ -166,19 +260,10 @@ def generate_fix(
         file_path=file_path,
         file_content=file_content,
     )
-    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
+    response = call_llm(prompt)
 
     try:
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            cleaned = "\n".join(lines[1:-1])
-            
-        # Optional: strip language tags if any from the backticks
-        if cleaned.startswith("json\n"):
-            cleaned = cleaned[5:]
-
-        fix_data = json.loads(cleaned)
+        fix_data = _extract_json(response)
 
         return Fix(
             file_path=fix_data.get("file_path", file_path),
@@ -187,9 +272,9 @@ def generate_fix(
             new_snippet=fix_data.get("new_snippet", ""),
             no_fix_needed=fix_data.get("no_fix_needed", False),
         )
-    except (json.JSONDecodeError, KeyError) as e:
+    except Exception as e:
         logger.error(f"Failed to parse fix response: {e}. Raw: {response[:500]}")
-        raise ValueError(f"Gemini returned an unparseable fix response: {e}")
+        raise ValueError(f"LLM returned an unparseable fix response: {e}")
 
 
 def generate_retry_fix(
@@ -206,18 +291,10 @@ def generate_retry_fix(
         previous_attempts=previous_attempts,
         test_output=test_output,
     )
-    response = _call_gemini(prompt, model_name="gemini-2.5-flash")
+    response = call_llm(prompt)
 
     try:
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            cleaned = "\n".join(lines[1:-1])
-            
-        if cleaned.startswith("json\n"):
-            cleaned = cleaned[5:]
-
-        fix_data = json.loads(cleaned)
+        fix_data = _extract_json(response)
 
         return Fix(
             file_path=fix_data.get("file_path", file_path),
@@ -226,6 +303,6 @@ def generate_retry_fix(
             new_snippet=fix_data.get("new_snippet", ""),
             no_fix_needed=fix_data.get("no_fix_needed", False),
         )
-    except (json.JSONDecodeError, KeyError) as e:
+    except Exception as e:
         logger.error(f"Failed to parse retry fix response: {e}. Raw: {response[:500]}")
-        raise ValueError(f"Gemini returned an unparseable retry fix response: {e}")
+        raise ValueError(f"LLM returned an unparseable retry fix response: {e}")

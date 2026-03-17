@@ -26,7 +26,7 @@ class PRCreator:
         branch_name: str,
         title: str,
         body: str,
-        base_branch: str = "main"
+        base_branch: str = "auto"
     ) -> Optional[str]:
         """
         Creates a PR on GitHub.
@@ -36,7 +36,8 @@ class PRCreator:
             branch_name: The head branch containing the fix.
             title: PR title.
             body: PR description (markdown).
-            base_branch: The target branch (default 'main').
+            base_branch: The target branch. Use 'auto' (default) to auto-detect
+                         the repo's default branch.
             
         Returns:
             The PR HTML URL if successful, None otherwise.
@@ -47,6 +48,12 @@ class PRCreator:
             
         try:
             repo = self.github.get_repo(repo_name)
+
+            # Auto-detect the repo's default branch to avoid 422 errors
+            if base_branch == "auto":
+                base_branch = repo.default_branch
+                logger.info(f"Auto-detected default branch: {base_branch}")
+
             pr = repo.create_pull(
                 title=title,
                 body=body,

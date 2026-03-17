@@ -8,16 +8,44 @@ const router = Router();
 
 router.post('/simulate', async (req: Request, res: Response): Promise<any> => {
   try {
-    const incidentData = req.body;
-    logger.info('Simulating incident ingestion', incidentData.incidentId);
+    const rawBody = req.body;
+    logger.info('Simulating incident ingestion', rawBody.incidentId);
 
-    // Create in DB
-    const incident = await incidentService.createIncident(incidentData);
-    
-    // Push to Redis Queue
+    // IMPORTANT: Strip the 'id' field sent by the frontend — Mongoose maps 'id'
+    // to the internal _id virtual, which expects a valid ObjectId. Our incident
+    // IDs like "INC-006" are NOT valid ObjectIds, so we must remove this field.
+    const { id, _id, ...incidentData } = rawBody;
+
+    let incident: any;
+    let mongoOk = false;
+
+    // Try to save to MongoDB (non-blocking if Mongo is down)
+    try {
+      incident = await incidentService.createIncident(incidentData);
+      mongoOk = true;
+    } catch (dbErr: any) {
+      logger.error('MongoDB save failed, falling back to Redis-only mode', dbErr.message);
+      // Build a plain incident object so we can still push to Redis
+      incident = {
+        ...incidentData,
+        status: 'queued',
+        createdAt: new Date().toISOString(),
+      };
+    }
+
+    // Always push to Redis queue — the agent worker doesn't need MongoDB
     await queueService.pushTask(incident);
-    
-    res.status(202).json({ message: 'Simulated incident queued successfully', incidentId: incident.incidentId });
+
+    if (!mongoOk) {
+      logger.info(`Pushed INC ${incident.incidentId} to queue (Redis-only, MongoDB unavailable)`);
+    }
+
+    res.status(202).json({ 
+      message: mongoOk 
+        ? 'Simulated incident queued successfully' 
+        : 'Simulated incident queued (Redis only — MongoDB unavailable)',
+      incidentId: incident.incidentId 
+    });
   } catch (error) {
     logger.error('Error simulating incident', error);
     res.status(500).json({ error: 'Failed to simulate incident' });

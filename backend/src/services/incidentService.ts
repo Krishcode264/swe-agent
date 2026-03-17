@@ -4,9 +4,12 @@ import { logger } from '../utils/logger';
 
 export const incidentService = {
   createIncident: async (data: Partial<IIncident>): Promise<IIncident> => {
-    const incident = new Incident(data);
-    await incident.save();
-    
+    // Use upsert so re-triggering the same incidentId doesn't crash with duplicate key error
+    const incident = await Incident.findOneAndUpdate(
+      { incidentId: data.incidentId },
+      { ...data, status: 'queued' },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
     await incidentService.addTimelineEvent(incident.incidentId, 'Incident received and created', 'queued');
     return incident;
   },

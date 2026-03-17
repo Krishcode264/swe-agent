@@ -37,9 +37,21 @@ def _build_auth_url(repo_url: str) -> str:
 
     If no token is set, returns the original URL (still works for public repos).
     """
-    if GITHUB_TOKEN and "github.com" in repo_url:
-        return repo_url.replace("https://", f"https://{GITHUB_TOKEN}@")
-    return repo_url
+    if not GITHUB_TOKEN or "github.com" not in repo_url:
+        return repo_url
+
+    # Clean up trailing slash to avoid Git rejection
+    clean_url = repo_url.rstrip("/")
+    
+    # If already has a token, return stripped version
+    if "@" in clean_url and "github.com" in clean_url:
+        return clean_url
+
+    # Inject token
+    if "https://" in clean_url:
+        return clean_url.replace("https://", f"https://{GITHUB_TOKEN}@")
+    
+    return clean_url
 
 
 def clone_repo(repo_url: str) -> str:
@@ -61,8 +73,8 @@ def clone_repo(repo_url: str) -> str:
     if not repo_url.startswith("http"):
         repo_url = f"https://github.com/{repo_url}.git"
 
-    # Derive a clean folder name: "Rezinix-AI/shopstack-platform" -> "shopstack-platform"
-    repo_name = repo_url.rstrip("/").rstrip(".git").split("/")[-1]
+    # Derive a clean folder name: "Krishcode264/testing-repo-for-swe-agent" -> "testing-repo-for-swe-agent"
+    repo_name = repo_url.rstrip("/").removesuffix(".git").split("/")[-1]
     clone_path = os.path.join(CLONE_BASE_DIR, repo_name)
 
     # If already cloned from a previous run, just pull latest instead of re-cloning

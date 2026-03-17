@@ -196,3 +196,41 @@ def read_file_lines(file_path: str, start_line: int, end_line: int) -> str:
         return result
     except Exception as e:
         return f"Error reading '{file_path}': {e}"
+
+
+def execute_command(command: str, cwd: str) -> str:
+    """
+    Execute an arbitrary shell command in the repository.
+    
+    Args:
+        command: The shell command to run.
+        cwd: Current working directory (should be absolute).
+        
+    Returns:
+        Standard output and error from the command.
+    """
+    import subprocess
+    logger.info(f"execute_command('{command}') in {cwd}")
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        output = result.stdout
+        if result.stderr:
+            output += "\n--- ERRORS ---\n" + result.stderr
+        
+        # Cap output size to avoid blowing up context
+        if len(output) > 5000:
+            output = output[:2500] + "\n... [TRUNCATED] ...\n" + output[-2500:]
+            
+        logger.info(f"execute_command result: code {result.returncode}, {len(output)} chars")
+        return output
+    except subprocess.TimeoutExpired:
+        return f"Error: Command timed out after 120s: {command}"
+    except Exception as e:
+        return f"Error executing command: {e}"

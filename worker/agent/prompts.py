@@ -15,6 +15,7 @@ You have access to tools that let you navigate a repository:
 - search_in_file(file_path, pattern) — search for a pattern in a specific file
 - search_in_directory(directory, pattern) — search for a pattern across all files
 - read_file_lines(file_path, start_line, end_line) — read a range of lines
+- execute_command(command, cwd) — run an arbitrary shell command (e.g., to check versions, install packages, or troubleshoot the environment)
 
 ## Your Process
 1. Read the incident ticket carefully — understand the error, affected service, and symptoms.
@@ -28,6 +29,8 @@ You have access to tools that let you navigate a repository:
 - Always verify file paths exist before reading them (use list_files first).
 - Never guess file contents. Always read them.
 - Your fix must be the MINIMUM change needed. Do not refactor or clean up unrelated code.
+- **IMPORTANT**: If tests are failing because the source code is buggy, **FIX THE SOURCE CODE** (usually in `src/` or at the root). Do NOT fix the test file to skip the failure unless the test itself is logically incorrect.
+- **Snippet Precision**: Your `original_snippet` must be an **EXACT** character-for-character, whitespace-for-whitespace match of the code in the file. Local models like Ollama are often imprecise - you must be extremely careful.
 - Explain your reasoning at each step.
 - If you are unsure, say so and explain what additional information you need.
 """
@@ -86,7 +89,8 @@ Respond in this exact JSON format:
 {{
     "found_root_cause": boolean, // True if this file contains the fixable bug
     "root_cause_explanation": "Detailed explanation of the problem here, or why you are moving on",
-    "suggested_next_files": ["app/routes/db.js", "app/config/index.js"] // If found_root_cause is false, what files should we read next?
+    "suggested_next_files": ["app/routes/db.js"], // If move on, what files to read?
+    "suggested_commands": ["npm list", "pip show X"] // Optional: commands to run for troubleshooting
 }}
 """
 
@@ -116,8 +120,8 @@ Generate the MINIMUM code change to fix this bug. Your response must be in this 
 ## Rules
 - Change as few lines as possible.
 - Preserve the existing code style (indentation, naming conventions, etc.).
-- The original_snippet must be an EXACT substring of the code above — character for character.
-- The new_snippet must be a drop-in replacement.
+- **STRICT MATCH**: The `original_snippet` must be an EXACT substring of the `file_content` provided above — character for character, including all spaces, tabs, and newlines.
+- **TARGET SOURCE**: Always try to fix the BUG, not the TEST. If `math.js` is wrong, fix `math.js`. Only fix `math.test.js` if the test case itself is mathematically or logically impossible.
 - Do NOT add unrelated improvements, refactoring, or comments.
 - If the issue is purely environmental (e.g., missing database connection, missing node modules, incorrect Node.js version) and absolutely cannot be patched with a code change here, set "no_fix_needed": true, and leave new_snippet and original_snippet as empty strings. 
 """
