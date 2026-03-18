@@ -229,7 +229,7 @@ def execute_command(command: str, cwd: str, container_id: Optional[str] = None) 
             shell=True,
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=30  # 30s max — prevents telnet/curl hangs from blocking the agent
         )
         output = result.stdout
         if result.stderr:
@@ -242,6 +242,7 @@ def execute_command(command: str, cwd: str, container_id: Optional[str] = None) 
         logger.info(f"execute_command result: code {result.returncode}, {len(output)} chars")
         return output
     except subprocess.TimeoutExpired:
-        return f"Error: Command timed out after 120s: {command}"
+        logger.warning(f"Command timed out after 30s: {command}")
+        return f"Error: Command timed out after 30s (likely a blocking network call): {command}"
     except Exception as e:
         return f"Error executing command: {e}"

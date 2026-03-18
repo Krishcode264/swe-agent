@@ -101,43 +101,69 @@ class LLMService {
   }
 
   async parseJiraPayload(payload: any): Promise<ParsedJiraIncident> {
+    // Jira webhooks sometimes nest the issue under payload.issue,
+    // but other times the issue IS the payload directly (top-level format).
+    const issue = payload.issue || payload;
+    const fields = issue.fields || {};
+
+    // Pre-extract key fields for the LLM prompt
+    const issueKey = issue.key || `JIRA-${Date.now()}`;
+    const summary = fields.summary || '';
+    const priority = fields.priority?.name || 'Medium';
+    const reporter = fields.reporter?.displayName || fields.creator?.displayName || 'Unknown';
+    const labels: string[] = fields.labels || [];
+    const components: string[] = (fields.components || []).map((c: any) => c.name);
+    const descriptionRaw = typeof fields.description === 'string'
+      ? fields.description
+      : JSON.stringify(fields.description || '');
+
     const prompt = `
-      You are an expert software engineering incident analyst. You have received a raw Jira webhook payload (in JSON format). Your job is to extract and synthesize a fully structured incident record from it.
-      
-      ## Raw Jira Webhook Payload
-      \`\`\`json
-      ${JSON.stringify(payload, null, 2)}
+      You are an expert software engineering incident analyst. You have received a raw Jira webhook payload. Your job is to extract a fully structured incident record from it.
+
+      ## Pre-Extracted Key Fields
+      - **Issue Key**: ${issueKey}
+      - **Summary (title field)**: ${summary || '(empty)'}
+      - **Priority**: ${priority}
+      - **Reporter**: ${reporter}
+      - **Labels**: ${labels.length > 0 ? labels.join(', ') : '(none)'}
+      - **Components**: ${components.length > 0 ? components.join(', ') : '(none)'}
+
+      ## Description Field (raw — may be Jira wiki markup or ADF JSON)
       \`\`\`
-      
+      ${descriptionRaw.substring(0, 4000)}
+      \`\`\`
+
+      ## Full Payload (for reference)
+      \`\`\`json
+      ${JSON.stringify(payload, null, 2).substring(0, 3000)}
+      \`\`\`
+
       ## Instructions
-      Carefully read the entire payload above. The issue details are typically found at:
-      - payload.issue.fields.summary → the issue title/summary
-      - payload.issue.fields.description → may be plain text, Atlassian Document Format (ADF), or a string
-      - payload.issue.fields.priority.name → priority level
-      - payload.issue.fields.reporter.displayName → reporter name
-      - payload.issue.fields.assignee → assignee
-      - payload.issue.key → the Jira issue key (e.g., "PROJ-123")
-      - payload.issue.fields.comment → comments with extra context
-      
+      Extract a structured incident from the above data. Important notes:
+      - The description body contains the REAL incident details and takes priority over the summary field
+      - The description may be in **Jira wiki markup** format: h3. = heading, {noformat}...{noformat} = code blocks, {{var}} = inline code. Extract plain text from it.
+      - The description may also be in **Atlassian Document Format (ADF)** — extract text from content[].content[].text recursively.
+      - Stack traces inside {noformat}...{noformat} blocks are the error_log
+      - Steps after "Steps to Reproduce" heading are steps_to_reproduce
+      - If summary and description describe different bugs, the description body wins for title/description/error_log
+
       **CRITICAL RULES:**
-      1. NEVER return "Untitled Jira Issue" or any generic placeholder as the title. If summary is empty, synthesize a concise, specific technical title from the description content.
-      2. The description field in Atlassian Document Format (ADF) stores text inside content[].content[].text — extract ALL text from it.
-      3. For error_log: extract any stack traces, exception messages, log snippets verbatim. Leave empty string if none.
-      4. For steps_to_reproduce: extract numbered/bulleted steps if present, else return [].
-      5. For service: infer from the issue content (e.g., "node-service", "python-service", "frontend"). Default to "unknown-service" only if truly undetectable.
-      6. RESPOND ONLY with a single valid JSON object, no markdown, no extra text.
+      1. NEVER return "Untitled Jira Issue" as title. Use summary, or synthesize from description.
+      2. Extract the FULL stack trace verbatim for error_log — this is critical for the agent.
+      3. For service: infer from labels, components, or issue content ("node-service", "python-service", "frontend"). Use "unknown-service" only if truly unclear.
+      4. RESPOND ONLY with a single valid JSON object, no markdown, no extra text.
 
       ## Required JSON Output
       {
-        "incidentId": "<Jira issue key, e.g. PROJ-123>",
-        "title": "<Clear, specific technical title — NO generic placeholders>",
-        "severity": "<P0 - Blocker | P1 - Critical | P2 - Major | P3 - Minor — map from Jira priority>",
-        "service": "<affected service, e.g. node-service | python-service | frontend>",
-        "reported_by": "<reporter display name>",
+        "incidentId": "${issueKey}",
+        "title": "<Clear, specific technical title derived from description body — NO generic placeholders>",
+        "severity": "<P0 - Blocker | P1 - Critical | P2 - Major | P3 - Minor — map from Jira priority '${priority}'>",
+        "service": "<affected service>",
+        "reported_by": "${reporter}",
         "environment": "<production | staging | development>",
-        "description": "<A clear 3-5 sentence technical summary of the problem synthesized from the issue content>",
+        "description": "<3-5 sentence technical summary from description body>",
         "steps_to_reproduce": ["<step 1>", "<step 2>"],
-        "error_log": "<verbatim stack trace or error message if present, else empty string>",
+        "error_log": "<verbatim stack trace from {noformat} blocks or description, else empty string>",
         "expected_behavior": "<what should happen>",
         "actual_behavior": "<what actually happens>",
         "repository": "<GitHub repo URL if mentioned, else 'https://github.com/Krishcode264/shopstack-platform.git'>"
@@ -241,7 +267,7 @@ class LLMService {
   private manualFallback(payload: any): ParsedJiraIncident {
     const issue = payload.issue || {};
     const fields = issue.fields || {};
-    
+
     // Try to extract plain text from ADF description format
     let descriptionText = '';
     if (typeof fields.description === 'string') {
@@ -259,10 +285,10 @@ class LLMService {
 
     // Synthesize title from summary or description
     const summary = fields.summary || '';
-    const synthesizedTitle = summary || 
+    const synthesizedTitle = summary ||
       (descriptionText ? descriptionText.split('.')[0].trim().substring(0, 120) : null) ||
       `Jira Issue ${issue.key || 'Unknown'}`;
-    
+
     return {
       incidentId: issue.key || `JIRA-${Date.now()}`,
       title: synthesizedTitle,

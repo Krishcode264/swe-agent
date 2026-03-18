@@ -294,6 +294,18 @@ def process_incident(incident: dict) -> ResolutionReport:
     repo_path = None
     
     try:
+        # ── Step 0: Early exit for empty/useless incidents ──
+        raw_description = incident.get("description", "").strip()
+        raw_error_log = incident.get("error_log", "").strip()
+        raw_title = incident.get("title", "").strip()
+
+        # If both description and error log are empty, there's nothing to investigate
+        if not raw_description and not raw_error_log and (not raw_title or raw_title.lower() in ["untitled", "untitiled jira issue", "untitled jira issue", ""]):
+            logger.warning(f"Incident {incident_id} has no description or error log — marking as insufficient_data.")
+            push_thought(incident_id, "⚠️ This incident has no description or error log. Cannot investigate without more information.")
+            update_incident_status(incident_id, "completed", "Insufficient data: no description or error log provided. Please add details to the issue.")
+            return report
+
         # ── Step 1: Parse the ticket ──
         update_incident_status(incident_id, "parsing", "Parsing incident ticket")
         from agent.prompts import PARSE_TICKET_PROMPT
@@ -389,6 +401,7 @@ def process_incident(incident: dict) -> ResolutionReport:
                     root_cause=root_cause,
                     file_path=target_file,
                     file_content=file_content,
+                    error_log=error_message,
                 )
             else:
                 update_incident_status(incident_id, "retrying", f"Revising fix based on test failure (attempt {attempt})")
@@ -455,18 +468,16 @@ def process_incident(incident: dict) -> ResolutionReport:
         report.report_markdown = _generate_report_markdown(report)
 
         # ── Step 7: Create PR ──
+        # IMPORTANT: Only create a PR if we actually patched a source file.
+        # Git side-effects (e.g. npm install creating package-lock.json) must NOT trigger a PR.
+        # If no_fix_needed=True, the agent determined this is not a code-fixable problem — skip PR.
         has_file_patch = any_fix_applied and report.fix and not report.fix.no_fix_needed
-        has_git_changes = has_uncommitted_changes(repo_path)
 
-        if has_file_patch or has_git_changes:
-            logger.info("A fix was applied. Proceeding with PR creation.")
+        if has_file_patch:
+            logger.info("A source-code fix was applied. Proceeding with PR creation.")
             try:
                 pr_creator = PRCreator()
-                if has_file_patch:
-                    commit_fix(repo_path, target_file, incident_id)
-                else:
-                    logger.info("Committing all uncommitted changes...")
-                    commit_all_changes(repo_path, incident_id, message=f"fix({incident_id}): apply agent-generated fix\n\nAutomated fix by swe-agent")
+                commit_fix(repo_path, target_file, incident_id)
                 push_branch(repo_path, branch_name)
                 # Prefer the real GitHub issue number (e.g., #42) for the PR title
                 # so GitHub auto-links and closes the issue on merge.
@@ -486,13 +497,21 @@ def process_incident(incident: dict) -> ResolutionReport:
                     body=report.report_markdown + closes_ref
                 )
                 report.pr_url = pr_url
+                push_thought(incident_id, f"🚀 PR created: {pr_url}")
                 update_incident_status(incident_id, "pr_created", f"PR created: {pr_url}")
                 update_incident_status(incident_id, "completed", "Incident resolved successfully with PR.")
             except Exception as e:
                 logger.error(f"Failed to create PR: {e}")
                 update_incident_status(incident_id, "pr_failed", f"PR creation failed: {e}")
+        elif report.fix and report.fix.no_fix_needed:
+            # Agent correctly determined this cannot be fixed with a code change
+            reason = report.fix.explanation or "Not a code-fixable issue"
+            logger.info(f"Skipping PR — agent determined no code fix needed: {reason}")
+            push_thought(incident_id, f"⚠️ No PR created: {reason}")
+            update_incident_status(incident_id, "completed", f"No code fix required: {reason}")
         else:
             logger.info("No code changes detected — skipping PR creation.")
+            update_incident_status(incident_id, "completed", "No code changes were produced.")
 
         return report
 

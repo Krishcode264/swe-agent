@@ -90,17 +90,18 @@ ANALYZE_CODE_PROMPT = """You are investigating a software incident. Here is the 
 ```
 
 ## Your Task
-1. Study this code carefully.
-2. Identify the specific line(s) that cause the reported error.
-3. Explain the root cause — what exactly is wrong and why it produces the reported behavior.
+1. Study this code carefully in the context of the reported error.
+2. Identify the specific line(s) that are or WERE causing the reported error.
+3. **IMPORTANT**: If the error log says a specific line/variable causes the problem, cross-reference it directly with the code even if the code looks correct now. The repo may have received a partial fix previously.
+4. Explain the root cause — what exactly is or was wrong.
 
 Be precise. Cite specific line numbers and variable names.
 
 Respond in this exact JSON format:
 {{
-    "found_root_cause": boolean, // True if this file contains the fixable bug
-    "root_cause_explanation": "Detailed explanation of the problem here, or why you are moving on",
-    "suggested_next_files": ["app/routes/db.js"], // If move on, what files to read?
+    "found_root_cause": boolean, // True if this file contains or contained the fixable bug
+    "root_cause_explanation": "Detailed explanation of the problem, or why you are moving on",
+    "suggested_next_files": ["app/routes/db.js"], // If not found here, what files to check next?
     "suggested_commands": ["npm list", "pip show X"] // Optional: commands to run for troubleshooting
 }}
 """
@@ -111,6 +112,10 @@ GENERATE_FIX_PROMPT = """You have identified the root cause of a software incide
 ## Incident
 - **ID**: {incident_id}
 - **Root Cause**: {root_cause}
+- **Original Error Log**:
+```
+{error_log}
+```
 
 ## Buggy Code
 **File**: {file_path}
@@ -134,8 +139,9 @@ Generate the MINIMUM code change to fix this bug. Your response must be in this 
 - **INDENTATION**: Copy indentation exactly as it appears in the file. Do not add or remove spaces/tabs.
 - **TARGET SOURCE**: Fix the BUG in source code (e.g., `src/` files), NOT in test files. Only fix test files if the test itself is logically incorrect.
 - Do NOT add unrelated improvements, refactoring, or comments.
-- If the issue is purely environmental (e.g., missing database, missing node_modules outside your control) and CANNOT be patched with a code change, set `"no_fix_needed": true` with empty `original_snippet` and `new_snippet`.
-- If you already ran a command (like `npm install`) that fixed the issue, set `"no_fix_needed": true`.
+- **ERROR LOG IS GROUND TRUTH**: If the Original Error Log above EXPLICITLY names a file, line number, or symbol as failing, you MUST treat that as the source of truth and fix it, even if the current code looks correct. The bug may have been introduced after the error was first reported.
+- Only set `no_fix_needed: true` if the error is PURELY environmental (e.g., missing external database, missing hardware) AND no code change can fix it. A missing import, wrong variable name, logic error — these are ALWAYS fixable with code.
+- If you cannot find the original_snippet exactly as shown, pick the nearest block where the fix should be applied and explain.
 """
 
 

@@ -250,6 +250,7 @@ def generate_fix(
     root_cause: str,
     file_path: str,
     file_content: str,
+    error_log: str = "",
 ) -> Fix:
     """
     Generate a minimal code fix for the identified root cause.
@@ -259,6 +260,7 @@ def generate_fix(
         root_cause=root_cause,
         file_path=file_path,
         file_content=file_content,
+        error_log=error_log or "Not provided",
     )
     response = call_llm(prompt)
 

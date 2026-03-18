@@ -99,14 +99,18 @@ router.post('/github', async (req: Request, res: Response): Promise<any> => {
 router.post('/jira', async (req: Request, res: Response): Promise<any> => {
   try {
     const payload = req.body;
-    const issue = payload.issue || {};
+    // Jira webhooks sometimes wrap the issue under payload.issue,
+    // but also sometimes send the issue data at the top level.
+    // Handle both formats gracefully.
+    const issue = payload.issue || payload;
 
-    logger.info('Received Jira webhook event', issue.key);
+    logger.info(`Received Jira webhook event: key=${issue.key || 'unknown'}`);
 
     // ⬇️ DEBUG: Log the full raw payload for inspection in Render/local logs
     logger.info('=== FULL JIRA PAYLOAD START ===');
     logger.info(JSON.stringify(payload, null, 2));
     logger.info('=== FULL JIRA PAYLOAD END ===');
+    logger.info(`Resolved issue key: ${issue.key}, summary: ${issue.fields?.summary?.substring(0, 80) || '(empty)'}`);
 
     // Call LLM to parse payload into structured incident data
     const parsedData = await llmService.parseJiraPayload(payload);

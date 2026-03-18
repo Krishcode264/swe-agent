@@ -77,16 +77,36 @@ def clone_repo(repo_url: str) -> str:
     repo_name = repo_url.rstrip("/").removesuffix(".git").split("/")[-1]
     clone_path = os.path.join(CLONE_BASE_DIR, repo_name)
 
-    # If already cloned from a previous run, just pull latest instead of re-cloning
+    # If already cloned from a previous run, reset to a clean main state
     if os.path.isdir(clone_path):
-        logger.info(f"Repo already exists at {clone_path}, pulling latest...")
+        logger.info(f"Repo already exists at {clone_path}, resetting to clean main...")
         try:
             existing_repo = Repo(clone_path)
-            existing_repo.remotes.origin.pull()
-            logger.info(f"Pulled latest changes for {repo_name}")
+            
+            # Determine the default branch (main or master)
+            default_branch = "main"
+            try:
+                existing_repo.git.checkout("main")
+            except GitCommandError:
+                try:
+                    existing_repo.git.checkout("master")
+                    default_branch = "master"
+                except GitCommandError:
+                    pass  # Stay on whatever branch we're on
+            
+            # Hard reset to discard any agent-made changes from previous runs
+            existing_repo.git.reset("--hard", f"origin/{default_branch}")
+            
+            # Remove untracked files/dirs (e.g. generated files, installed deps)
+            existing_repo.git.clean("-fd")
+            
+            # Now pull latest from the remote default branch
+            existing_repo.remotes.origin.pull(default_branch)
+            
+            logger.info(f"Reset {repo_name} to clean {default_branch} state successfully")
             return clone_path
         except Exception as e:
-            logger.warning(f"Pull failed ({e}), deleting and re-cloning...")
+            logger.warning(f"Reset failed ({e}), deleting and re-cloning...")
             shutil.rmtree(clone_path, ignore_errors=True)
 
     # Fresh clone — depth=1 is a shallow clone (much faster, only latest commit)
