@@ -20,5 +20,11 @@ export const api = {
   getTimeline: async (id: string): Promise<TimelineEvent[]> => {
     const response = await axios.get(`${API_URL}/incidents/${id}/timeline`);
     return response.data;
-  }
+  },
+
+  getReport: async (id: string): Promise<string> => {
+    const response = await axios.get(`${API_URL}/incidents/${id}/report`);
+    // Backend returns either a plain string or { markdown: string }
+    return typeof response.data === 'string' ? response.data : response.data.markdown ?? '';
+  },
 };
