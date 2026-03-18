@@ -1,0 +1,20 @@
+redis==4.6.0
+requests==2.31.0
+GitPython==3.1.32
+python-dotenv==1.0.0
+pytest==7.4.0
+
+# LLM and agent dependencies
+google-genai>=1.0.0
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# GitHub PR creation
+PyGithub>=2.1.0
+
+# Sandbox isolation
+docker>=6.1.0
+
+# Report generation
+Jinja2>=3.1.0
+
