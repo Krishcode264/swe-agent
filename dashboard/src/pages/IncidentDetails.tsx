@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { Incident, TimelineEvent } from '../types/incident';
 import TimelineView from '../components/TimelineView';
 import StatusBadge from '../components/StatusBadge';
+import AgentThinking from '../components/AgentThinking';
 
 const IncidentDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -78,6 +79,10 @@ const IncidentDetails: React.FC = () => {
             <h2 className="text-lg font-medium text-gray-900 mb-6">Resolution Timeline</h2>
             <TimelineView events={timeline} />
           </div>
+          <AgentThinking
+            incidentId={incident.incidentId}
+            isRunning={['queued', 'running', 'parsing', 'cloning', 'investigating', 'fixing', 'retrying', 'fix_applied'].includes(incident.status)}
+          />
         </div>
       </div>
     </div>

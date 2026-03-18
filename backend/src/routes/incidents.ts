@@ -32,6 +32,27 @@ router.get('/:id/timeline', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/:id/thoughts', async (req: Request, res: Response) => {
+  try {
+    const thoughts = await incidentService.getThoughts(req.params.id);
+    res.json(thoughts);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch agent thoughts' });
+  }
+});
+
+router.post('/:id/thoughts', async (req: Request, res: Response) => {
+  try {
+    const { thought } = req.body;
+    if (!thought) return res.status(400).json({ error: 'thought field is required' });
+    await incidentService.addThought(req.params.id, thought);
+    res.status(201).json({ message: 'Thought logged' });
+  } catch (error) {
+    logger.error('Error logging agent thought', error);
+    res.status(500).json({ error: 'Failed to log thought' });
+  }
+});
+
 router.put('/:id', async (req: Request, res: Response) => {
   try {
     const incident = await incidentService.updateIncident(req.params.id, req.body);

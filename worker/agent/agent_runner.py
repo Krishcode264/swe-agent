@@ -18,7 +18,7 @@ import os
 from typing import Optional
 
 from shared.models import Fix, TestResults, ResolutionReport
-from shared.database_client import update_incident_status
+from shared.database_client import update_incident_status, push_thought
 from sandbox.apply_fix import apply_fix
 from sandbox.test_runner import run_tests, install_dependencies
 from github_integration.pr_creator import PRCreator
@@ -313,6 +313,7 @@ def process_incident(incident: dict) -> ResolutionReport:
         report.hypothesis = hypothesis
         report.service = service
         logger.info(f"Parsed ticket: service={service}, hypothesis={hypothesis[:100]}")
+        push_thought(incident_id, f"🔍 Parsed ticket. Identified service: '{service}'. Initial hypothesis: {hypothesis}")
 
         # ── Step 2: Clone/locate the repository ──
         update_incident_status(incident_id, "cloning", "Cloning repository")
@@ -333,8 +334,10 @@ def process_incident(incident: dict) -> ResolutionReport:
         
         if not container_id:
             logger.error("Failed to start Docker sandbox. Falling back to local execution.")
+            push_thought(incident_id, "⚠️ Docker sandbox failed to start — falling back to local execution mode.")
         else:
             logger.info(f"Docker sandbox started: {container_id[:12]}")
+            push_thought(incident_id, f"🐳 Docker sandbox ready ({image_name}). Repository volume-mounted at /app.")
         
         # Use issue_number for branch name if available (e.g. fix/42), else use incident_id
         issue_number = incident.get("issue_number")
@@ -368,6 +371,7 @@ def process_incident(incident: dict) -> ResolutionReport:
             workdir=container_service_path
         )
         report.root_cause = root_cause
+        push_thought(incident_id, f"🧠 Root cause identified: {root_cause[:200]}. Target file: {target_file}")
 
         # ── Step 4: Generate and apply fix (with retry loop) ──
         fix = None
@@ -397,6 +401,7 @@ def process_incident(incident: dict) -> ResolutionReport:
 
             report.fix = fix
             logger.info(f"Fix attempt {attempt}: {fix.explanation}")
+            push_thought(incident_id, f"🔧 Fix attempt {attempt}: {fix.explanation}")
             previous_attempts_history += f"Attempt {attempt}:\nFile: {target_file}\nExplanation: {fix.explanation}\nOriginal: {fix.original_snippet}\nNew: {fix.new_snippet}\n"
 
             applied = apply_fix(repo_path, fix)
@@ -427,9 +432,11 @@ def process_incident(incident: dict) -> ResolutionReport:
             if test_results.passed:
                 logger.info(f"Tests PASSED on attempt {attempt}!")
                 update_incident_status(incident_id, "tests_passed", "All tests passed")
+                push_thought(incident_id, f"✅ Tests passed on attempt {attempt}! The fix works correctly.")
                 break
             else:
                 logger.warning(f"Tests FAILED on attempt {attempt}: {test_results.output[:200]}")
+                push_thought(incident_id, f"❌ Tests failed on attempt {attempt}. Output snippet: {test_results.output[:150]}. Revising the fix...")
                 if attempt > MAX_RETRIES:
                     update_incident_status(incident_id, "partial_fix", f"Fix applied but tests still failing after {MAX_RETRIES + 1} attempts")
 

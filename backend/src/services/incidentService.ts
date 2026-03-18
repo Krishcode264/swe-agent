@@ -4,7 +4,6 @@ import { logger } from '../utils/logger';
 
 export const incidentService = {
   createIncident: async (data: Partial<IIncident>): Promise<IIncident> => {
-    // Use upsert so re-triggering the same incidentId doesn't crash with duplicate key error
     const incident = await Incident.findOneAndUpdate(
       { incidentId: data.incidentId },
       { ...data, status: 'queued' },
@@ -35,12 +34,27 @@ export const incidentService = {
   },
 
   addTimelineEvent: async (incidentId: string, message: string, status: string) => {
-    const event = new TimelineEvent({ incidentId, message, status });
+    const event = new TimelineEvent({ incidentId, message, status, type: 'status' });
     await event.save();
     logger.info(`Timeline updated for ${incidentId}: ${message}`);
   },
 
+  addThought: async (incidentId: string, thought: string) => {
+    const event = new TimelineEvent({
+      incidentId,
+      message: thought,
+      status: 'thinking',
+      type: 'thinking'
+    });
+    await event.save();
+    logger.info(`Agent thought logged for ${incidentId}: ${thought.substring(0, 80)}...`);
+  },
+
   getTimeline: async (incidentId: string) => {
-    return await TimelineEvent.find({ incidentId }).sort({ timestamp: 1 });
+    return await TimelineEvent.find({ incidentId, type: 'status' }).sort({ timestamp: 1 });
+  },
+
+  getThoughts: async (incidentId: string) => {
+    return await TimelineEvent.find({ incidentId, type: 'thinking' }).sort({ timestamp: 1 });
   }
 };
