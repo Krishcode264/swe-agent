@@ -84,27 +84,46 @@ class LLMService {
 
   async parseJiraPayload(payload: any): Promise<ParsedJiraIncident> {
     const prompt = `
-      You are an expert system that parses Jira webhook payloads into structured incident data.
+      You are an expert software engineering incident analyst. You have received a raw Jira webhook payload (in JSON format). Your job is to extract and synthesize a fully structured incident record from it.
       
-      ## Jira Payload
+      ## Raw Jira Webhook Payload
       \`\`\`json
       ${JSON.stringify(payload, null, 2)}
       \`\`\`
       
-      ## Task
-      Extract the following fields from the Jira payload. Respond ONLY with a valid JSON object matching these fields:
-      - incidentId: Use the Jira issue key (e.g., "PROJ-123").
-      - title: Use the issue summary.
-      - severity: Map Jira priority to "P0", "P1", "P2", or "P3".
-      - service: Try to identify the affected service (e.g., "node-service", "python-service") from summary/description.
-      - reported_by: Display name of the reporter.
-      - environment: Mention of "prod", "staging", or "dev". Default "production".
-      - description: Full issue description.
-      - steps_to_reproduce: Extract list of steps if any.
-      - error_log: Extract stack traces/error messages if any.
-      - expected_behavior: What was expected.
-      - actual_behavior: What actually happened.
-      - repository: The GitHub repository URL if mentioned (default "https://github.com/Krishcode264/shopstack-platform.git").
+      ## Instructions
+      Carefully read the entire payload above. The issue details are typically found at:
+      - payload.issue.fields.summary → the issue title/summary
+      - payload.issue.fields.description → may be plain text, Atlassian Document Format (ADF), or a string
+      - payload.issue.fields.priority.name → priority level
+      - payload.issue.fields.reporter.displayName → reporter name
+      - payload.issue.fields.assignee → assignee
+      - payload.issue.key → the Jira issue key (e.g., "PROJ-123")
+      - payload.issue.fields.comment → comments with extra context
+      
+      **CRITICAL RULES:**
+      1. NEVER return "Untitled Jira Issue" or any generic placeholder as the title. If summary is empty, synthesize a concise, specific technical title from the description content.
+      2. The description field in Atlassian Document Format (ADF) stores text inside content[].content[].text — extract ALL text from it.
+      3. For error_log: extract any stack traces, exception messages, log snippets verbatim. Leave empty string if none.
+      4. For steps_to_reproduce: extract numbered/bulleted steps if present, else return [].
+      5. For service: infer from the issue content (e.g., "node-service", "python-service", "frontend"). Default to "unknown-service" only if truly undetectable.
+      6. RESPOND ONLY with a single valid JSON object, no markdown, no extra text.
+
+      ## Required JSON Output
+      {
+        "incidentId": "<Jira issue key, e.g. PROJ-123>",
+        "title": "<Clear, specific technical title — NO generic placeholders>",
+        "severity": "<P0 - Blocker | P1 - Critical | P2 - Major | P3 - Minor — map from Jira priority>",
+        "service": "<affected service, e.g. node-service | python-service | frontend>",
+        "reported_by": "<reporter display name>",
+        "environment": "<production | staging | development>",
+        "description": "<A clear 3-5 sentence technical summary of the problem synthesized from the issue content>",
+        "steps_to_reproduce": ["<step 1>", "<step 2>"],
+        "error_log": "<verbatim stack trace or error message if present, else empty string>",
+        "expected_behavior": "<what should happen>",
+        "actual_behavior": "<what actually happens>",
+        "repository": "<GitHub repo URL if mentioned, else 'https://github.com/Krishcode264/shopstack-platform.git'>"
+      }
     `;
 
     // Try Gemini first
@@ -167,14 +186,35 @@ class LLMService {
     const issue = payload.issue || {};
     const fields = issue.fields || {};
     
+    // Try to extract plain text from ADF description format
+    let descriptionText = '';
+    if (typeof fields.description === 'string') {
+      descriptionText = fields.description;
+    } else if (fields.description?.content) {
+      // ADF format: recursively extract text nodes
+      const extractAdfText = (node: any): string => {
+        if (!node) return '';
+        if (node.type === 'text') return node.text || '';
+        if (node.content) return node.content.map(extractAdfText).join(' ');
+        return '';
+      };
+      descriptionText = extractAdfText(fields.description).trim();
+    }
+
+    // Synthesize title from summary or description
+    const summary = fields.summary || '';
+    const synthesizedTitle = summary || 
+      (descriptionText ? descriptionText.split('.')[0].trim().substring(0, 120) : null) ||
+      `Jira Issue ${issue.key || 'Unknown'}`;
+    
     return {
       incidentId: issue.key || `JIRA-${Date.now()}`,
-      title: fields.summary || 'Untitiled Jira Issue',
-      severity: fields.priority?.name === 'Highest' ? 'P0' : 'P1',
-      service: 'unknown',
-      reported_by: fields.reporter?.displayName || 'Jira Webhook',
+      title: synthesizedTitle,
+      severity: fields.priority?.name === 'Highest' || fields.priority?.name === 'Blocker' ? 'P0 - Blocker' : 'P1 - Critical',
+      service: 'unknown-service',
+      reported_by: fields.reporter?.displayName || fields.creator?.displayName || 'Jira Webhook',
       environment: 'production',
-      description: fields.description || '',
+      description: descriptionText || summary || 'No description provided.',
       steps_to_reproduce: [],
       error_log: '',
       expected_behavior: '',

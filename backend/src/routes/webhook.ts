@@ -103,6 +103,11 @@ router.post('/jira', async (req: Request, res: Response): Promise<any> => {
 
     logger.info('Received Jira webhook event', issue.key);
 
+    // ⬇️ DEBUG: Log the full raw payload for inspection in Render/local logs
+    logger.info('=== FULL JIRA PAYLOAD START ===');
+    logger.info(JSON.stringify(payload, null, 2));
+    logger.info('=== FULL JIRA PAYLOAD END ===');
+
     // Call LLM to parse payload into structured incident data
     const parsedData = await llmService.parseJiraPayload(payload);
     
