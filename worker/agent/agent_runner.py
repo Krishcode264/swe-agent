@@ -36,6 +36,7 @@ from .tools import (
     search_in_directory,
     execute_command,
 )
+from sandbox.docker_runner import docker_runner
 from .prompts import REPORT_PROMPT
 from .fix_generator import call_llm
 
@@ -83,6 +84,8 @@ def _investigate_codebase(
     service_path: str,
     affected_file: Optional[str] = None,
     report=None,
+    container_id: Optional[str] = None,
+    workdir: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """
     Investigate the codebase to find the root cause.
@@ -286,9 +289,12 @@ def process_incident(incident: dict) -> ResolutionReport:
         files_analyzed=[],
     )
 
+    # Initialize variables for cleanup
+    container_id = None
+    repo_path = None
+    
     try:
         # ── Step 1: Parse the ticket ──
-        # Use Krishna's pre-extracted fields directly — much cheaper than asking Gemini to re-extract them
         update_incident_status(incident_id, "parsing", "Parsing incident ticket")
         from agent.prompts import PARSE_TICKET_PROMPT
         parsed = parse_ticket(
@@ -314,6 +320,22 @@ def process_incident(incident: dict) -> ResolutionReport:
 
         repo_path = clone_repo(repo_url or "https://github.com/Rezinix-AI/shopstack-platform.git")
         service_path = _detect_service_root(repo_path, service)
+        
+        # ── Step 2.1: Start Docker Sandbox ──
+        service_type = "python" if service.lower().startswith("python") else "node"
+        image_name = "python:3.11-slim" if service_type == "python" else "node:20-alpine"
+        
+        update_incident_status(incident_id, "cloning", f"Starting Docker sandbox ({image_name})")
+        
+        # Mount the entire repo for maximum flexibility
+        volume_mounts = {repo_path: {'bind': '/app', 'mode': 'rw'}}
+        container_id = docker_runner.create_sandbox(image_name, volume_mounts)
+        
+        if not container_id:
+            logger.error("Failed to start Docker sandbox. Falling back to local execution.")
+        else:
+            logger.info(f"Docker sandbox started: {container_id[:12]}")
+        
         # Use issue_number for branch name if available (e.g. fix/42), else use incident_id
         issue_number = incident.get("issue_number")
         branch_name = f"fix/{issue_number}" if issue_number else f"fix/{incident_id.lower()}"
@@ -321,7 +343,16 @@ def process_incident(incident: dict) -> ResolutionReport:
         
         # ── Step 2.5: Install Dependencies (Sandbox Robustness) ──
         update_incident_status(incident_id, "cloning", "Installing dependencies in sandbox")
-        install_dependencies(service_path, service_type="python" if service.lower().startswith("python") else "node")
+        
+        # Map local service_path to container path
+        container_service_path = os.path.join("/app", os.path.relpath(service_path, repo_path)) if container_id else service_path
+        
+        install_dependencies(
+            service_path, 
+            service_type=service_type, 
+            container_id=container_id,
+            workdir=container_service_path
+        )
 
         # ── Step 3: Investigate the codebase ──
         update_incident_status(incident_id, "investigating", "Analyzing codebase for root cause")
@@ -333,25 +364,22 @@ def process_incident(incident: dict) -> ResolutionReport:
             service_path=service_path,
             affected_file=affected_file,
             report=report,
+            container_id=container_id,
+            workdir=container_service_path
         )
         report.root_cause = root_cause
-        # No need to manually append target_file since _investigate_codebase now handles reporting analyzed files
 
         # ── Step 4: Generate and apply fix (with retry loop) ──
         fix = None
         test_results = None
-        service_type = "python" if service.lower().startswith("python") else "node"
         previous_attempts_history = ""
+        any_fix_applied = False
 
-        for attempt in range(1, MAX_RETRIES + 2):  # +2 because range is exclusive and attempt starts at 1
+        for attempt in range(1, MAX_RETRIES + 2):
             report.retry_count = attempt
 
             if attempt == 1:
-                # First attempt: generate fix from root cause
-                update_incident_status(
-                    incident_id, "fixing",
-                    f"Generating fix (attempt {attempt})"
-                )
+                update_incident_status(incident_id, "fixing", f"Generating fix (attempt {attempt})")
                 fix = generate_fix(
                     incident_id=incident_id,
                     root_cause=root_cause,
@@ -359,38 +387,32 @@ def process_incident(incident: dict) -> ResolutionReport:
                     file_content=file_content,
                 )
             else:
-                # Retry: feed test failure back to Claude
-                update_incident_status(
-                    incident_id, "retrying",
-                    f"Revising fix based on test failure (attempt {attempt})"
-                )
+                update_incident_status(incident_id, "retrying", f"Revising fix based on test failure (attempt {attempt})")
                 fix = generate_retry_fix(
                     file_path=target_file,
                     previous_attempts=previous_attempts_history,
                     test_output=test_results.output[:3000] if test_results else "",
                 )
-                # Re-read file content (may have changed from previous attempt)
                 file_content = read_file(target_file)
 
             report.fix = fix
             logger.info(f"Fix attempt {attempt}: {fix.explanation}")
-
             previous_attempts_history += f"Attempt {attempt}:\nFile: {target_file}\nExplanation: {fix.explanation}\nOriginal: {fix.original_snippet}\nNew: {fix.new_snippet}\n"
 
-            # Apply the fix (using precision matching)
             applied = apply_fix(repo_path, fix)
             if not applied and not fix.no_fix_needed:
                 logger.error(f"Failed to apply fix on attempt {attempt}")
                 continue
 
+            any_fix_applied = True
             if fix.no_fix_needed:
-                logger.info(f"Fix generation stated no fix needed. Stopping retries.")
+                logger.info("Fix generation stated no fix needed. Stopping retries.")
                 break
 
             update_incident_status(incident_id, "fix_applied", "Fix applied, running tests")
 
-            # Run tests
-            test_results = _run_tests_in_service(service_path, service_type)
+            # Run tests (pass container_id if available)
+            test_results = run_tests(service_path, service_type=service_type, container_id=container_id, workdir=container_service_path)
             report.test_results = test_results
             previous_attempts_history += f"Test Output:\n{test_results.output[:1000]}\n" + "-" * 40 + "\n"
 
@@ -409,14 +431,10 @@ def process_incident(incident: dict) -> ResolutionReport:
             else:
                 logger.warning(f"Tests FAILED on attempt {attempt}: {test_results.output[:200]}")
                 if attempt > MAX_RETRIES:
-                    update_incident_status(
-                        incident_id, "partial_fix",
-                        f"Fix applied but tests still failing after {MAX_RETRIES + 1} attempts"
-                    )
+                    update_incident_status(incident_id, "partial_fix", f"Fix applied but tests still failing after {MAX_RETRIES + 1} attempts")
 
         # ── Step 5: Calculate confidence score ──
         if report.env_error_detected:
-            # Score code analysis, don't penalize for env failure
             report.confidence_score = max(50, 80 - (report.retry_count - 1) * 10)
         elif test_results and test_results.passed:
             report.confidence_score = max(60, 95 - (report.retry_count - 1) * 15)
@@ -430,52 +448,45 @@ def process_incident(incident: dict) -> ResolutionReport:
         report.report_markdown = _generate_report_markdown(report)
 
         # ── Step 7: Create PR ──
-        # Create a PR if:
-        #   (a) A file was explicitly patched via apply_fix(), OR
-        #   (b) A command (e.g. npm install) modified files that git can detect
-        has_file_patch = report.fix and not report.fix.no_fix_needed
+        has_file_patch = any_fix_applied and report.fix and not report.fix.no_fix_needed
         has_git_changes = has_uncommitted_changes(repo_path)
 
         if has_file_patch or has_git_changes:
             logger.info("A fix was applied. Proceeding with PR creation.")
             try:
                 pr_creator = PRCreator()
-
                 if has_file_patch:
-                    # Commit only the patched file
                     commit_fix(repo_path, target_file, incident_id)
                 else:
-                    # Commit all side-effect changes (package.json, lockfiles, etc.)
-                    logger.info("Committing all uncommitted changes (dependency/config updates)...")
-                    commit_all_changes(
-                        repo_path,
-                        incident_id,
-                        message=(
-                            f"fix({incident_id}): apply agent-generated fix\n\n"
-                            f"Automated fix by swe-agent: {report.fix.explanation if report.fix else 'dependency/config update'}"
-                        )
-                    )
-
+                    logger.info("Committing all uncommitted changes...")
+                    commit_all_changes(repo_path, incident_id, message=f"fix({incident_id}): apply agent-generated fix\n\nAutomated fix by swe-agent")
                 push_branch(repo_path, branch_name)
+                # Prefer the real GitHub issue number (e.g., #42) for the PR title
+                # so GitHub auto-links and closes the issue on merge.
+                github_issue_number = incident.get("issue_number")
+                if github_issue_number:
+                    pr_title = f"Fix #{github_issue_number}: {incident.get('title', incident_id)}"
+                    closes_ref = f"\n\n---\nCloses #{github_issue_number}"
+                else:
+                    # Fallback for manually simulated incidents (no real GitHub issue)
+                    pr_title = f"Fix: {incident.get('title', incident_id)}"
+                    closes_ref = ""
 
                 pr_url = pr_creator.create_pull_request(
                     repo_name=repo_url.split("github.com/")[-1].replace(".git", ""),
                     branch_name=branch_name,
-                    title=f"Fix {incident_id}: {incident.get('title')}",
-                    body=report.report_markdown
+                    title=pr_title,
+                    body=report.report_markdown + closes_ref
                 )
                 report.pr_url = pr_url
                 update_incident_status(incident_id, "pr_created", f"PR created: {pr_url}")
                 update_incident_status(incident_id, "completed", "Incident resolved successfully with PR.")
             except Exception as e:
                 logger.error(f"Failed to create PR: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
                 update_incident_status(incident_id, "pr_failed", f"PR creation failed: {e}")
         else:
             logger.info("No code changes detected — skipping PR creation.")
 
-        logger.info(f"=== Finished agent workflow for {incident_id} (confidence: {report.confidence_score}) ===")
         return report
 
     except Exception as e:
@@ -484,3 +495,17 @@ def process_incident(incident: dict) -> ResolutionReport:
         report.root_cause = f"Agent failed: {e}"
         report.confidence_score = 0
         return report
+
+    finally:
+        # ── Cleanup ──
+        if container_id:
+            try:
+                docker_runner.destroy_sandbox(container_id)
+                logger.info(f"Cleaned up Docker sandbox: {container_id[:12]}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup Docker sandbox: {e}")
+        
+        # We don't necessarily want to cleanup the repo if we need it for logs,
+        # but the original code had it here.
+        # if repo_path:
+        #     cleanup_repo(repo_path)

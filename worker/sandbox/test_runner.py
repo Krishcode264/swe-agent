@@ -6,7 +6,7 @@ from shared.models import TestResults
 
 logger = logging.getLogger(__name__)
 
-def run_tests(repo_path: str, service_type: Optional[str] = None) -> TestResults:
+def run_tests(repo_path: str, service_type: Optional[str] = None, container_id: Optional[str] = None, workdir: Optional[str] = None) -> TestResults:
     """
     Detects the service type and runs the appropriate test suite.
     Attempts auto-recovery if missing dependencies are detected.
@@ -16,9 +16,9 @@ def run_tests(repo_path: str, service_type: Optional[str] = None) -> TestResults
     
     # First attempt
     if service_type == "python":
-        results = _run_pytest(repo_path)
+        results = _run_pytest(repo_path, container_id=container_id, workdir=workdir)
     elif service_type == "node":
-        results = _run_npm_test(repo_path)
+        results = _run_npm_test(repo_path, container_id=container_id, workdir=workdir)
     else:
         return TestResults(
             passed=False,
@@ -28,39 +28,51 @@ def run_tests(repo_path: str, service_type: Optional[str] = None) -> TestResults
 
     # Check for missing dependencies and retry once if found
     if not results.passed:
-        if _handle_missing_dependencies(results.output, repo_path, service_type):
+        if _handle_missing_dependencies(results.output, repo_path, service_type, container_id=container_id, workdir=workdir):
             logger.info("Retrying tests after dependency installation...")
             if service_type == "python":
-                results = _run_pytest(repo_path)
+                results = _run_pytest(repo_path, container_id=container_id, workdir=workdir)
             elif service_type == "node":
-                results = _run_npm_test(repo_path)
+                results = _run_npm_test(repo_path, container_id=container_id, workdir=workdir)
     
     return results
 
-def install_dependencies(service_path: str, service_type: str) -> bool:
+def install_dependencies(service_path: str, service_type: str, container_id: Optional[str] = None, workdir: Optional[str] = None) -> bool:
     """
     Installs dependencies for the given service type.
     
     Args:
         service_path: Absolute path to the service directory.
         service_type: 'python' or 'node'.
+        container_id: Optional Docker container ID.
+        workdir: Working directory inside the container.
         
     Returns:
         True if installation succeeded, False otherwise.
     """
     if service_type == "python":
-        return _run_pip_install(service_path)
+        return _run_pip_install(service_path, container_id=container_id, workdir=workdir)
     elif service_type == "node":
-        return _run_npm_install(service_path)
+        return _run_npm_install(service_path, container_id=container_id, workdir=workdir)
     return True
 
-def _run_npm_install(service_path: str) -> bool:
+def _run_npm_install(service_path: str, container_id: Optional[str] = None, workdir: Optional[str] = None) -> bool:
     """Runs npm install in the service directory."""
-    logger.info(f"Running npm install in {service_path}")
+    logger.info(f"Running npm install in {service_path} (container={container_id})")
+    from .docker_runner import docker_runner
     try:
-        # Check if package-lock.json exists, if so use ci for faster/cleaner install
-        cmd = ["npm", "ci"] if os.path.exists(os.path.join(service_path, "package-lock.json")) else ["npm", "install"]
+        # Check if package-lock.json exists
+        has_lock = os.path.exists(os.path.join(service_path, "package-lock.json"))
+        cmd = "npm ci" if has_lock else "npm install"
         
+        if container_id:
+            output, exit_code = docker_runner.execute_command(container_id, cmd, workdir=workdir or service_path)
+            if exit_code != 0 and has_lock:
+                 logger.info("Retrying with npm install...")
+                 output, exit_code = docker_runner.execute_command(container_id, "npm install", workdir=workdir or service_path)
+            return exit_code == 0
+
+        cmd_list = ["npm", "ci"] if has_lock else ["npm", "install"]
         result = subprocess.run(
             cmd,
             cwd=service_path,
@@ -80,17 +92,15 @@ def _run_npm_install(service_path: str) -> bool:
         logger.error(f"Error running npm install: {e}")
         return False
 
-def _run_pip_install(service_path: str) -> bool:
+def _run_pip_install(service_path: str, container_id: Optional[str] = None, workdir: Optional[str] = None) -> bool:
     """Runs pip install in the service directory."""
-    req_file = os.path.join(service_path, "requirements.txt")
-    if not os.path.exists(req_file):
-        logger.warning(f"No requirements.txt found in {service_path}")
-        return True
-        
-    logger.info(f"Running pip install in {service_path}")
+    from .docker_runner import docker_runner
+    logger.info(f"Running pip install in {service_path} (container={container_id})")
     try:
-        # Use simple pip install -r requirements.txt
-        # Ideally, we'd use a virtualenv inside the sandbox, but for now we install to current env
+        if container_id:
+            output, exit_code = docker_runner.execute_command(container_id, "pip install -r requirements.txt", workdir=workdir or service_path)
+            return exit_code == 0
+            
         result = subprocess.run(
             ["pip", "install", "-r", "requirements.txt"],
             cwd=service_path,
@@ -117,14 +127,16 @@ def _detect_service_type(repo_path: str) -> str:
     
     return "unknown"
 
-def _run_pytest(repo_path: str) -> TestResults:
-    """Runs pytest via subprocess."""
-    logger.info(f"Running pytest in {repo_path}")
+def _run_pytest(repo_path: str, container_id: Optional[str] = None, workdir: Optional[str] = None) -> TestResults:
+    """Runs pytest."""
+    from .docker_runner import docker_runner
+    logger.info(f"Running pytest in {repo_path} (container={container_id})")
     try:
-        # Try finding local pytest first (e.g. in venv or bin)
+        if container_id:
+            output, exit_code = docker_runner.execute_command(container_id, "pytest -v", workdir=workdir or repo_path)
+            return TestResults(passed=(exit_code == 0), output=output, tests_added=[])
+
         pytest_cmd = "pytest"
-        
-        # Run pytest, capture output
         result = subprocess.run(
             [pytest_cmd, "-v"],
             cwd=repo_path,
@@ -143,18 +155,16 @@ def _run_pytest(repo_path: str) -> TestResults:
     except Exception as e:
         return TestResults(passed=False, output=f"Error running pytest: {str(e)}", tests_added=[])
 
-def _run_npm_test(repo_path: str) -> TestResults:
-    """Runs npm test via subprocess."""
-    logger.info(f"Running npm test in {repo_path}")
+def _run_npm_test(repo_path: str, container_id: Optional[str] = None, workdir: Optional[str] = None) -> TestResults:
+    """Runs npm test."""
+    from .docker_runner import docker_runner
+    logger.info(f"Running npm test in {repo_path} (container={container_id})")
     try:
-        # Try local jest if npm test fails or if we want to be explicit
-        # npx jest is usually safer if jest isn't in global path
+        if container_id:
+            output, exit_code = docker_runner.execute_command(container_id, "npm test", workdir=workdir or repo_path)
+            return TestResults(passed=(exit_code == 0), output=output, tests_added=[])
+
         cmd = ["npm", "test"]
-        
-        # Check if we can use npx to ensure local binaries are used
-        # We'll stick to npm test as it usually handles the environment correctly
-        
-        # Run npm test, capture output
         result = subprocess.run(
             cmd,
             cwd=repo_path,
@@ -173,14 +183,12 @@ def _run_npm_test(repo_path: str) -> TestResults:
     except Exception as e:
         return TestResults(passed=False, output=f"Error running npm test: {str(e)}", tests_added=[])
 
-def _handle_missing_dependencies(test_output: str, service_path: str, service_type: str) -> bool:
+def _handle_missing_dependencies(test_output: str, service_path: str, service_type: str, container_id: Optional[str] = None, workdir: Optional[str] = None) -> bool:
     """
     Parses test output for missing dependency errors and attempts to install them.
-    
-    Returns:
-        True if an installation was attempted, False otherwise.
     """
     import re
+    from .docker_runner import docker_runner
     
     attempted = False
     
@@ -189,17 +197,22 @@ def _handle_missing_dependencies(test_output: str, service_path: str, service_ty
     if node_manual_match and service_type == "node":
         package = node_manual_match.group(1)
         logger.info(f"Detected missing Node package: {package}. Attempting install...")
-        subprocess.run(["npm", "install", package], cwd=service_path, capture_output=True)
+        if container_id:
+            docker_runner.execute_command(container_id, f"npm install {package}", workdir=workdir or service_path)
+        else:
+            subprocess.run(["npm", "install", package], cwd=service_path, capture_output=True)
         attempted = True
         
     # Pattern 2: Node.js "Cannot find module 'X'"
     node_module_match = re.search(r"Cannot find module '([\w@/-]+)'", test_output)
     if node_module_match and service_type == "node":
         package = node_module_match.group(1)
-        # Skip relative paths
         if not package.startswith("."):
             logger.info(f"Detected missing Node module: {package}. Attempting install...")
-            subprocess.run(["npm", "install", package], cwd=service_path, capture_output=True)
+            if container_id:
+                docker_runner.execute_command(container_id, f"npm install {package}", workdir=workdir or service_path)
+            else:
+                subprocess.run(["npm", "install", package], cwd=service_path, capture_output=True)
             attempted = True
 
     # Pattern 3: Python "ModuleNotFoundError: No module named 'X'"
@@ -207,7 +220,10 @@ def _handle_missing_dependencies(test_output: str, service_path: str, service_ty
     if py_module_match and service_type == "python":
         package = py_module_match.group(1)
         logger.info(f"Detected missing Python module: {package}. Attempting install...")
-        subprocess.run(["pip", "install", package], cwd=service_path, capture_output=True)
+        if container_id:
+            docker_runner.execute_command(container_id, f"pip install {package}", workdir=workdir or service_path)
+        else:
+            subprocess.run(["pip", "install", package], cwd=service_path, capture_output=True)
         attempted = True
         
     return attempted

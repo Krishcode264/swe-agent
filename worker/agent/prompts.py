@@ -33,6 +33,17 @@ You have access to tools that let you navigate a repository:
 - **Snippet Precision**: Your `original_snippet` must be an **EXACT** character-for-character, whitespace-for-whitespace match of the code in the file. Local models like Ollama are often imprecise - you must be extremely careful.
 - Explain your reasoning at each step.
 - If you are unsure, say so and explain what additional information you need.
+
+## Project Context: E-Commerce Platform (Shopstack)
+This repository contains a microservices-based e-commerce platform with two services:
+- **Python Service**: Flask API (port 5000), using SQLAlchemy and pytest.
+- **Node.js Service**: Express API (port 3000), using Sequelize and Jest.
+
+### Troubleshooting & Setup Rules:
+- **Python Service**: Always run commands from the `python-service/` directory. If `psycopg2-binary` fails to install, skip it (tests use SQLite).
+- **Node.js Service**: Always run commands from the `node-service/` directory. If `sqlite3` build errors occur, run `npm rebuild sqlite3`.
+- **Database**: Both services use in-memory SQLite for tests, so no external DB setup is required for the test suite.
+- **Environment**: You are running inside a specialized Docker sandbox (`python:3.11-slim` or `node:20-alpine`). The repository is mounted at `/app`.
 """
 
 
@@ -191,4 +202,34 @@ Write a professional resolution report in markdown format including:
 4. Validation results
 5. Confidence assessment (0-100 with justification). If `Environment Error Detected` is True, do not artificially deflate the score just because tests failed - score your confidence in your *code analysis* and note that the environment was unavailable.
 6. Risk assessment (what could still go wrong)
+"""
+
+
+SETUP_DIAGNOSIS_PROMPT = """You are an expert devops and systems engineer. A software setup process (cloning or dependency installation) has FAILED. Your job is to analyze the error log and suggest the next steps to resolve it.
+
+## Context
+- **Incident ID**: {incident_id}
+- **Service Type**: {service_type}
+- **Command Run**: {command}
+- **Service Path**: {service_path}
+
+## Error Log
+```
+{error_log}
+```
+
+## Your Task
+Analyze the error and respond in this exact JSON format:
+{{
+    "analysis": "Briefly explain why the setup failed",
+    "can_fix_automatically": boolean, // True if a command can likely fix this
+    "suggested_command": "The specific command to run to fix the environment (e.g., 'pip install --prefer-binary X' or 'apt-get install Y')",
+    "is_system_limit": boolean, // True if this is a platform/OS limit that a command cannot fix (e.g. Python version mismatch)
+    "explanation_for_human": "What the human user needs to do if you can't fix it automatically"
+}}
+
+## Guidelines
+- If it's a missing C library (like libpq-dev), suggest the apt-get command.
+- If it's a binary incompatibility (like psycopg2 on Python 3.13), suggest using --prefer-binary OR explain that a different Python version is needed.
+- Be extremely precise with command syntax.
 """

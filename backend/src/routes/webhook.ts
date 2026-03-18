@@ -68,13 +68,25 @@ router.post('/github', async (req: Request, res: Response): Promise<any> => {
 
     logger.info('Received valid assigned github issue payload');
 
-    // Convert issue to structured incident
-    const incidentData = githubService.extractIncidentData(payload);
+    // Step 1: Extract raw metadata (IDs, URLs, source) — deterministic, no LLM needed
+    const metadata = githubService.extractMetadata(payload);
+
+    // Step 2: Use LLM to parse the human-written issue body into structured incident fields
+    logger.info(`Parsing GitHub issue #${payload.issue?.number} with LLM...`);
+    const parsedContent = await llmService.parseGithubIssue(payload);
+    logger.info(`LLM parsed issue: service=${parsedContent.service}, severity=${parsedContent.severity}`);
+
+    // Step 3: Merge LLM-parsed content with raw metadata
+    const incidentData = {
+      ...parsedContent,
+      ...metadata,
+      // Keep issue_url and triggered_by from metadata (they're exact values, not parsed)
+    };
     
-    // Create in DB
+    // Step 4: Save to MongoDB
     const incident = await incidentService.createIncident(incidentData);
     
-    // Push to Redis Queue
+    // Step 5: Push to Redis Queue
     await queueService.pushTask(incident);
     
     res.status(202).json({ message: 'Incident queued successfully', incidentId: incident.incidentId });
@@ -88,15 +100,8 @@ router.post('/jira', async (req: Request, res: Response): Promise<any> => {
   try {
     const payload = req.body;
     const issue = payload.issue || {};
-    const labels: string[] = issue.fields?.labels || [];
-    
-    // Check if Jira issue is labeled with "trigger-agent"
-    if (!labels.includes('trigger-agent')) {
-      logger.info('Jira issue does not have "trigger-agent" label, ignoring', issue.key);
-      return res.status(200).send('ignore');
-    }
 
-    logger.info('Received valid labeling event from Jira', issue.key);
+    logger.info('Received Jira webhook event', issue.key);
 
     // Call LLM to parse payload into structured incident data
     const parsedData = await llmService.parseJiraPayload(payload);

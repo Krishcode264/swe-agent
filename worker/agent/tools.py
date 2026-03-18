@@ -9,7 +9,7 @@ The LangGraph agent calls these tools iteratively to investigate the codebase.
 import os
 import re
 import logging
-from typing import List
+from typing import List, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -198,19 +198,30 @@ def read_file_lines(file_path: str, start_line: int, end_line: int) -> str:
         return f"Error reading '{file_path}': {e}"
 
 
-def execute_command(command: str, cwd: str) -> str:
+def execute_command(command: str, cwd: str, container_id: Optional[str] = None) -> str:
     """
     Execute an arbitrary shell command in the repository.
+    Can run either locally via subprocess or inside a Docker container.
     
     Args:
         command: The shell command to run.
         cwd: Current working directory (should be absolute).
+        container_id: Optional Docker container ID to run the command in.
         
     Returns:
         Standard output and error from the command.
     """
     import subprocess
-    logger.info(f"execute_command('{command}') in {cwd}")
+    from sandbox.docker_runner import docker_runner
+    
+    logger.info(f"execute_command('{command}') (container={container_id})")
+    
+    if container_id:
+        # Resolve workdir relative to container
+        # Note: In our current setup, repo is mounted at /app
+        output, exit_code = docker_runner.execute_command(container_id, command, workdir=cwd)
+        return output
+
     try:
         result = subprocess.run(
             command,

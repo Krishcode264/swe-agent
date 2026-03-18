@@ -1,0 +1,34 @@
+Summary Template
+
+Title: Antigravity - Autonomous Agentic Coding Platform
+Category: Rezinix AI Track
+Problem Statement: Standard software engineering processes are often bottlenecked by manual bug investigation, repetitive patching, and dependency management. Imprecise LLM outputs often fail during the "patch application" phase, and existing CI/CD pipelines require manual intervention to move from issue reports (Jira/GitHub) to code changes (PRs).
+
+Abstract: Antigravity is an end-to-end Agentic AI platform designed to automate the entire software maintenance lifecycle. It monitors issue trackers (GitHub, Jira), uses high-reasoning LLMs to autonomously investigate codebases, generates verified fixes, and opens Pull Requests. The project focuses on "Universal Patching Resilience," ensuring that even imprecise model outputs are successfully integrated into complex codebases.
+
+Features:
+- **Autonomous Incident Resolution**: Automatically detects labeled GitHub issues or Jira tickets and triggers a headless agent worker.
+- **4-Tier Patching Engine**: A proprietary cascading logic (Exact → Normalized → Fuzzy → Anchor Line) that allows local models like Ollama (qwen2.5-coder) to successfully patch files even with whitespace or formatting mismatches.
+- **Multi-Source Webhook Orchestration**: Integrated support for GitHub and Jira with an LLM-powered parser that translates unstructured tickets into actionable engineering tasks.
+- **Resilient Execution Environment**: A sandboxed Python/Node.js environment that automatically installs dependencies, runs test suites, and validates fixes before PR creation.
+- **Intelligent PR Creation**: Automatically detects both source code changes and "side-effect" changes (like `package.json` updates from `npm install`) to ensure complete delivery of fixes.
+
+Tech Stack:
+- **Backend Orchestrator**: Node.js, TypeScript, Express.js.
+- **Database/Messaging**: MongoDB (Incident tracking), Redis (Task queuing).
+- **Agent Worker**: Python 3.x, Git, Shell integration.
+- **AI/LLMs**: Google Gemini (High-reasoning cloud), Ollama/qwen2.5-coder (Local/Edge execution), Ngrok (Secure tunneling).
+- **Infrastructure**: Docker-ready services with secure environment management.
+
+How Agentic AI is implemented (Only for Rezinix AI Track):
+Antigravity implements Agentic AI through a "Reason-then-Act" architecture. The agent utilizes a recursive feedback loop where it:
+1.  **Perceives**: Parses complex issue payloads (GitHub/Jira) using LLM-based structured extraction.
+2.  **Investigates**: Dynamically explores the remote repository, searching for relevant files and analyzing logic.
+3.  **Reasons**: Generates hypothesis-based fixes using large context windows.
+4.  **Verifies**: Automatically executes shell commands to run tests and uses a "4-Tier Matching Engine" to apply imprecise code snippets.
+The system is designed to be model-agnostic, seamlessly failing over from Cloud APIs (Gemini) to Local LLMs (Ollama) to ensure 24/7 autonomous operation without manual supervisor intervention.
+
+Important Instructions Compliance:
+- Word Count: Approximately 450 words.
+- Visuals: The platform architecture supports graphical representation of its task-queue-worker flow.
+- SDGs: Not applicable (AI Track), but aligns with Goal 9 (Industry, Innovation, and Infrastructure).
