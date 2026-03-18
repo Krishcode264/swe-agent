@@ -30,9 +30,27 @@ export interface ParsedGithubIncident {
 }
 
 class LLMService {
-  private geminiKey = process.env.GEMINI_API_KEY;
+  // Support rotating Gemini keys: use GEMINI_API_KEYS (comma-separated) if set,
+  // otherwise fall back to single GEMINI_API_KEY.
+  private geminiKeys: string[] = [];
+  private currentKeyIndex = 0;
   private ollamaUrl = process.env.OLLAMA_BASE_URL;
   private ollamaModel = process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b';
+
+  constructor() {
+    const multiKeys = process.env.GEMINI_API_KEYS;
+    const singleKey = process.env.GEMINI_API_KEY;
+    if (multiKeys) {
+      this.geminiKeys = multiKeys.split(',').map(k => k.trim()).filter(Boolean);
+    } else if (singleKey) {
+      this.geminiKeys = [singleKey];
+    }
+    logger.info(`LLMService initialized with ${this.geminiKeys.length} Gemini key(s)`);
+  }
+
+  private get geminiKey(): string | undefined {
+    return this.geminiKeys[this.currentKeyIndex];
+  }
 
   async parseGithubIssue(payload: any): Promise<ParsedGithubIncident> {
     const issue = payload.issue || {};
@@ -149,20 +167,58 @@ class LLMService {
   }
 
   private async callGemini(prompt: string): Promise<ParsedJiraIncident> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${this.geminiKey}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { response_mime_type: 'application/json' }
-      })
-    });
+    // Try each key in the rotation — move to next on 429/quota errors
+    const totalKeys = this.geminiKeys.length;
+    if (totalKeys === 0) throw new Error('No Gemini API keys configured');
 
-    const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) throw new Error('Empty response from Gemini');
-    return JSON.parse(text);
+    for (let attempt = 0; attempt < totalKeys; attempt++) {
+      const keyIndex = (this.currentKeyIndex + attempt) % totalKeys;
+      const key = this.geminiKeys[keyIndex];
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`;
+
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { response_mime_type: 'application/json' }
+          })
+        });
+
+        // On quota/rate-limit, rotate to the next key
+        if (response.status === 429 || response.status === 403) {
+          logger.warn(`Gemini key [${keyIndex}] hit rate limit (${response.status}), rotating to next key...`);
+          this.currentKeyIndex = (keyIndex + 1) % totalKeys;
+          continue;
+        }
+
+        const data = await response.json();
+
+        // API-level quota error in the response body
+        if (data.error?.code === 429 || data.error?.status === 'RESOURCE_EXHAUSTED') {
+          logger.warn(`Gemini key [${keyIndex}] quota exhausted, rotating to next key...`);
+          this.currentKeyIndex = (keyIndex + 1) % totalKeys;
+          continue;
+        }
+
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw new Error(`Empty response from Gemini (key ${keyIndex})`);
+
+        // Success — remember this working key as the starting point next time
+        this.currentKeyIndex = keyIndex;
+        return JSON.parse(text);
+      } catch (err: any) {
+        // Only re-throw if it's not a quota error — quota errors should rotate
+        if (!err.message?.includes('quota') && !err.message?.includes('RESOURCE_EXHAUSTED')) {
+          throw err;
+        }
+        logger.warn(`Gemini key [${keyIndex}] error: ${err.message}, rotating...`);
+        this.currentKeyIndex = (keyIndex + 1) % totalKeys;
+      }
+    }
+
+    throw new Error('All Gemini API keys exhausted or quota exceeded');
   }
 
   private async callOllama(prompt: string): Promise<ParsedJiraIncident> {
