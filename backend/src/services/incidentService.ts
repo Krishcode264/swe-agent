@@ -51,7 +51,8 @@ export const incidentService = {
   },
 
   getTimeline: async (incidentId: string) => {
-    return await TimelineEvent.find({ incidentId, type: 'status' }).sort({ timestamp: 1 });
+    // Use $ne instead of exact match so old events (pre-'type' field) still show up
+    return await TimelineEvent.find({ incidentId, type: { $ne: 'thinking' } }).sort({ timestamp: 1 });
   },
 
   getThoughts: async (incidentId: string) => {
