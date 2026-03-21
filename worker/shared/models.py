@@ -11,7 +11,7 @@ This module defines the shared data contract used by ALL modules:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 
 @dataclass
@@ -19,8 +19,13 @@ class Fix:
     """Represents a single code fix applied to resolve an incident."""
     file_path: str           # Path relative to repo root (e.g., "app/routes/auth.py")
     explanation: str         # Human-readable explanation of what was changed and why
-    original_snippet: str    # The exact code before the fix
-    new_snippet: str         # The exact code after the fix
+    new_code: str            # The complete replacement code for the target
+    symbol_name: Optional[str] = None
+    symbol_type: Optional[str] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    expected_old_code: Optional[str] = None
+    original_snippet: str = "" # Legacy text-match (kept for reporting)
     no_fix_needed: bool = False # Set True if the issue is environmental/infra and cannot be patched here
 
 
@@ -30,6 +35,7 @@ class TestResults:
     passed: bool             # Did all tests pass?
     output: str              # Full stdout/stderr captured from the test run
     tests_added: List[str] = field(default_factory=list)  # Names of any new tests generated
+    summary: Dict[str, Any] = field(default_factory=dict) # Structured summary of failures/passes
 
 
 @dataclass
@@ -45,10 +51,10 @@ class ResolutionReport:
         - Gaurav's report generator: report_markdown
     """
     incident_id: str                        # e.g., "INC-001"
-    ticket_text: str                        # Raw ticket JSON string
-    hypothesis: str                         # Agent's initial hypothesis before confirming
-    root_cause: str                         # Confirmed root cause after analysis
-    files_analyzed: List[str]               # All file paths the agent read during investigation
+    ticket_text: str = ""                   # Raw ticket JSON string
+    hypothesis: str = ""                    # Agent's initial hypothesis before confirming
+    root_cause: str = ""                    # Confirmed root cause after analysis
+    files_analyzed: List[str] = field(default_factory=list) # All file paths the agent read during investigation
     service: str = "unknown"                # The affected service name
     fix: Optional[Fix] = None               # The applied fix (None if agent couldn't generate one)
     test_results: Optional[TestResults] = None  # None if tests haven't run yet

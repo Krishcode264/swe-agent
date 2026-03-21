@@ -50,7 +50,7 @@ ReferenceError: db_url is not defined
             print(f"\n📂 File to Fix: {report.fix.file_path}")
             print(f"💡 Explanation: {report.fix.explanation}")
             print(f"❌ Original Snippet:\n{report.fix.original_snippet}")
-            print(f"✅ Fixed Snippet:\n{report.fix.new_snippet}")
+            print(f"✅ Fixed Code:\n{report.fix.new_code}")
             print(f"🛠️ Is Environmental? {report.fix.no_fix_needed}")
         else:
             print("\n⚠️ No fix generated. Root cause:", report.root_cause)

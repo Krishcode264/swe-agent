@@ -15,7 +15,7 @@ from typing import Optional
 from google import genai
 import requests
 
-from config import GEMINI_API_KEY, LLM_PROVIDER, OLLAMA_BASE_URL, OLLAMA_MODEL
+from config import GEMINI_API_KEY, GEMINI_API_KEYS, LLM_PROVIDER, OLLAMA_BASE_URL, OLLAMA_MODEL
 from shared.models import Fix
 from agent.prompts import (
     PARSE_TICKET_PROMPT,
@@ -26,20 +26,16 @@ from agent.prompts import (
 
 logger = logging.getLogger(__name__)
 
-# Initialize Gemini client
-_client: Optional[genai.Client] = None
+# Key rotation state for Gemini
+_current_key_index = 0
 
 
-def _get_client() -> genai.Client:
-    """Lazy-initialize the Gemini client."""
-    global _client
-    if _client is None:
-        if not GEMINI_API_KEY:
-            raise ValueError(
-                "GEMINI_API_KEY is not set. Add it to your .env file."
-            )
-        _client = genai.Client(api_key=GEMINI_API_KEY)
-    return _client
+def _get_client(key_index: int = 0) -> genai.Client:
+    """Create a Gemini client with the specified key index."""
+    if not GEMINI_API_KEYS:
+        raise ValueError("No Gemini API keys configured. Set GEMINI_API_KEY or GEMINI_API_KEYS in .env")
+    key = GEMINI_API_KEYS[key_index % len(GEMINI_API_KEYS)]
+    return genai.Client(api_key=key)
 
 
 def call_llm(prompt: str, model_name: Optional[str] = None) -> str:
@@ -54,18 +50,33 @@ def call_llm(prompt: str, model_name: Optional[str] = None) -> str:
 
 def _call_gemini(prompt: str, model_name: str) -> str:
     """
-    Make a single Gemini API call and return the text response.
+    Make a Gemini API call with automatic key rotation on 429/quota errors.
+    Tries each key in GEMINI_API_KEYS before giving up.
     """
-    client = _get_client()
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        logger.error(f"Gemini API call failed: {e}")
-        raise
+    global _current_key_index
+    total_keys = len(GEMINI_API_KEYS)
+    if total_keys == 0:
+        raise ValueError("No Gemini API keys configured.")
+
+    for attempt in range(total_keys):
+        key_index = (_current_key_index + attempt) % total_keys
+        client = _get_client(key_index)
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            _current_key_index = key_index  # remember last working key
+            return response.text
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
+                logger.warning(f"Gemini key [{key_index}] quota exhausted, rotating to next key...")
+                continue  # try next key
+            logger.error(f"Gemini API call failed (key [{key_index}]): {e}")
+            raise
+
+    raise RuntimeError(f"All {total_keys} Gemini API key(s) exhausted quota. Cannot proceed.")
 
 
 def _call_ollama(prompt: str, model_name: str) -> str:
@@ -219,6 +230,8 @@ def analyze_code(
     hypothesis: str,
     file_path: str,
     file_content: str,
+    pinned_context: str = "",
+    scratchpad: str = "",
 ) -> dict:
     """
     Analyze a code file in the context of an incident to identify the root cause.
@@ -231,6 +244,8 @@ def analyze_code(
         hypothesis=hypothesis,
         file_path=file_path,
         file_content=file_content,
+        pinned_context=pinned_context,
+        scratchpad=scratchpad,
     )
     response = call_llm(prompt)
     
@@ -251,6 +266,8 @@ def generate_fix(
     file_path: str,
     file_content: str,
     error_log: str = "",
+    pinned_context: str = "",
+    scratchpad: str = "",
 ) -> Fix:
     """
     Generate a minimal code fix for the identified root cause.
@@ -261,6 +278,8 @@ def generate_fix(
         file_path=file_path,
         file_content=file_content,
         error_log=error_log or "Not provided",
+        pinned_context=pinned_context,
+        scratchpad=scratchpad,
     )
     response = call_llm(prompt)
 
@@ -270,8 +289,13 @@ def generate_fix(
         return Fix(
             file_path=fix_data.get("file_path", file_path),
             explanation=fix_data.get("explanation", ""),
+            new_code=fix_data.get("new_code", ""),
+            symbol_name=fix_data.get("symbol_name"),
+            symbol_type=fix_data.get("symbol_type"),
+            start_line=fix_data.get("start_line"),
+            end_line=fix_data.get("end_line"),
+            expected_old_code=fix_data.get("expected_old_code"),
             original_snippet=fix_data.get("original_snippet", ""),
-            new_snippet=fix_data.get("new_snippet", ""),
             no_fix_needed=fix_data.get("no_fix_needed", False),
         )
     except Exception as e:
@@ -283,6 +307,8 @@ def generate_retry_fix(
     file_path: str,
     previous_attempts: str,
     test_output: str,
+    test_summary: str = "",
+    patching_error: str = "",
 ) -> Fix:
     """
     Generate a revised fix after previous attempts failed tests.
@@ -292,6 +318,8 @@ def generate_retry_fix(
         file_path=file_path,
         previous_attempts=previous_attempts,
         test_output=test_output,
+        test_summary=test_summary,
+        patching_error=patching_error,
     )
     response = call_llm(prompt)
 
@@ -301,8 +329,13 @@ def generate_retry_fix(
         return Fix(
             file_path=fix_data.get("file_path", file_path),
             explanation=fix_data.get("explanation", ""),
+            new_code=fix_data.get("new_code", ""),
+            symbol_name=fix_data.get("symbol_name"),
+            symbol_type=fix_data.get("symbol_type"),
+            start_line=fix_data.get("start_line"),
+            end_line=fix_data.get("end_line"),
+            expected_old_code=fix_data.get("expected_old_code"),
             original_snippet=fix_data.get("original_snippet", ""),
-            new_snippet=fix_data.get("new_snippet", ""),
             no_fix_needed=fix_data.get("no_fix_needed", False),
         )
     except Exception as e:

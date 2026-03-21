@@ -7,6 +7,8 @@ An end-to-end platform designed to automatically detect, analyze, and resolve so
 
 ## 🏗️ System Architecture
 
+
+![alt text](image.png)
 ```text
                       ┌───────────────────────────────┐
                       │           GitHub              │
@@ -72,8 +74,16 @@ An end-to-end platform designed to automatically detect, analyze, and resolve so
             Backend Orchestrator
 ```
 
+
+
+## patching logic
+![alt text](image-1.png)
 ## 🚀 Live Demonstration
 
+
+
+## Sandbox 
+![alt text](image-2.png)
 | Component | URL |
 | :--- | :--- |
 | **Dashboard UI** | [swe-agent-pkhe.vercel.app](https://swe-agent-pkhe.vercel.app/) |

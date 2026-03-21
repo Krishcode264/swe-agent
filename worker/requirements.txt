@@ -18,3 +18,8 @@ docker>=6.1.0
 # Report generation
 Jinja2>=3.1.0
 
+# AST Parsing for surgical patches
+tree-sitter>=0.21.0
+tree-sitter-python
+tree-sitter-javascript
+

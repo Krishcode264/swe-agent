@@ -13,6 +13,10 @@ AI_API_KEY = os.getenv("AI_API_KEY", "")
 # Gemini API key (primary LLM for agent reasoning)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# Rotating Gemini keys — comma-separated list. If set, the worker rotates on quota errors.
+_raw_keys = os.getenv("GEMINI_API_KEYS", "")
+GEMINI_API_KEYS: list[str] = [k.strip() for k in _raw_keys.split(",") if k.strip()] if _raw_keys else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+
 # GitHub Personal Access Token (for PR creation)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 

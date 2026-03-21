@@ -15,12 +15,52 @@ so that queue_listener.py can call it without changes.
 import json
 import logging
 import os
-from typing import Optional
+import operator
+from typing import Optional, List, TypedDict, Annotated, Sequence, Union
 
+from langgraph.graph import StateGraph, END
 from shared.models import Fix, TestResults, ResolutionReport
 from shared.database_client import update_incident_status, push_thought
-from sandbox.apply_fix import apply_fix
-from sandbox.test_runner import run_tests, install_dependencies
+
+class AgentState(TypedDict):
+    incident: dict
+    incident_id: str
+    repo_url: str
+    repo_path: Optional[str]
+    service_path: Optional[str]
+    service: str
+    language: str
+    container_id: Optional[str]
+    
+    hypothesis: str
+    root_cause: str
+    target_file: str
+    file_content: str
+    
+    proposed_fix: Optional[Fix]
+    test_results: Optional[TestResults]
+    
+    attempt_count: int
+    messages: Annotated[Sequence[Union[dict, str]], operator.add]
+    
+    files_analyzed: List[str]
+    history: str
+    
+    confidence: float
+    report: Optional[ResolutionReport]
+    pr_url: Optional[str]
+    status: str
+    similar_incidents: List[dict]
+    scratchpad: str
+    
+    # Sandbox v2 fields
+    sandbox_result: Optional[dict]
+    sandbox_attempts: int
+    last_test_context: str
+    max_sandbox_attempts: int
+    investigation_attempts: int
+from .patcher import patch_file_tool
+from sandbox.sandbox_node import sandbox_node, route_after_sandbox
 from github_integration.pr_creator import PRCreator
 from config import TARGET_REPO
 from .fix_generator import (
@@ -45,34 +85,58 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 2
 
 
+def detect_language(incident: dict, files_analyzed: list[str]) -> str:
+    """Robust language detection for sandbox routing."""
+    from pathlib import Path
+    
+    # 1. Check analyzed files (most reliable signal)
+    extensions = {Path(f).suffix.lower() for f in files_analyzed if f}
+    if extensions & {".js", ".ts", ".jsx", ".tsx"}:
+        return "node"
+    if extensions & {".py"}:
+        return "python"
+    
+    # 2. Check service name from incident/ticket
+    service = str(incident.get("service", "") or incident.get("service_name", "")).lower()
+    if "node" in service:
+        return "node"
+    if "python" in service:
+        return "python"
+    
+    # 3. Last fallback
+    return "python"
+
+
 def _detect_service_root(repo_path: str, service_name: str) -> str:
     """
     Detect the root directory of the affected service within the repo.
-
-    Args:
-        repo_path: Absolute path to the cloned repository root.
-        service_name: Service identifier from the ticket (e.g., 'python-service', 'node-service').
-
-    Returns:
-        Absolute path to the service's root directory.
     """
-    # Map common service names to directory patterns
+    # 1. Direct Mapping
     service_dirs = {
-        "python-service": ["python-service", "python_service", "flask-app", "backend"],
-        "python": ["python-service", "python_service", "flask-app", "backend"],
-        "node-service": ["node-service", "node_service", "express-app", "api"],
-        "node": ["node-service", "node_service", "express-app", "api"],
+        "python-service": ["python-service", "python_service", "app", "src", "backend"],
+        "node-service": ["node-service", "node_service", "src", "api", "express-app"],
+        "node": ["node-service", "node_service", "src", "api", "express-app"],
     }
 
-    candidates = service_dirs.get(service_name.lower(), [service_name])
+    sn_lower = str(service_name).lower()
+    candidates = service_dirs.get(sn_lower, [sn_lower])
+    
+    # 2. Search for the candidate in the repo
     for candidate in candidates:
-        service_path = os.path.join(repo_path, candidate)
-        if os.path.isdir(service_path):
-            logger.info(f"Found service directory: {service_path}")
-            return service_path
+        if not candidate: continue
+        path = os.path.join(repo_path, candidate)
+        if os.path.isdir(path):
+            logger.info(f"Detected service root: {path}")
+            return path
+            
+    # 3. Fallback: Search for directory containing identifying files
+    for root, dirs, files in os.walk(repo_path):
+        if "package.json" in files and "node" in sn_lower:
+            return root
+        if "requirements.txt" in files and "python" in sn_lower:
+            return root
 
-    # Fallback: return repo root
-    logger.warning(f"Could not find service directory for '{service_name}', using repo root.")
+    logger.warning(f"Could not find exact service directory for '{service_name}', defaulting to repo root.")
     return repo_path
 
 
@@ -90,7 +154,7 @@ def _investigate_codebase(
     """
     Investigate the codebase to find the root cause.
     Uses file tools to navigate the code, then Claude to analyze.
-    Returns: (root_cause, file_path, file_content)
+    Returns: (root_cause, file_path, file_content, files_analyzed)
     """
     import re
     files_analyzed = []
@@ -183,10 +247,15 @@ def _investigate_codebase(
             commands = analysis.get("suggested_commands", [])
             if commands:
                 env_feedback = "" # Reset feedback for this round
+                from .tools import execute_command # already imported but for clarity
+                # Note: execute_command now has its own validation, but we can pre-filter here
                 for cmd in commands:
                     logger.info(f"Running suggested command: {cmd}")
                     cmd_res = execute_command(cmd, service_path)
-                    env_feedback += f"\n$ {cmd}\n{cmd_res}\n"
+                    if "is not a valid shell command" not in cmd_res:
+                        env_feedback += f"\n$ {cmd}\n{cmd_res}\n"
+                    else:
+                        logger.warning(f"Skipping invalid suggested command: {cmd}")
 
             root_cause = analysis.get("root_cause_explanation", "")
             target_file = current_file
@@ -208,30 +277,10 @@ def _investigate_codebase(
             logger.warning(f"Failed to investigate {current_file}: {e}")
             continue
 
-    return root_cause, target_file, file_content
+    return root_cause, target_file, file_content, files_analyzed
 
 
-def _apply_fix_to_file(file_path: str, fix: Fix) -> bool:
-    """
-    Apply a Fix to an actual file by replacing original_snippet with new_snippet.
 
-    Returns True if the fix was applied successfully.
-    """
-    try:
-        content = read_file(file_path)
-        if fix.original_snippet not in content:
-            logger.error(f"Original snippet not found in {file_path}")
-            return False
-
-        new_content = content.replace(fix.original_snippet, fix.new_snippet, 1)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-
-        logger.info(f"Fix applied to {file_path}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to apply fix to {file_path}: {e}")
-        return False
 
 
 # These are now handled by sandboxed modules.
@@ -255,283 +304,478 @@ def _generate_report_markdown(report: ResolutionReport) -> str:
 def process_incident(incident: dict) -> ResolutionReport:
     """
     Main entry point — processes a single incident through the full agent loop.
-
-    This function preserves the original interface so queue_listener.py
-    can call it without changes.
-
-    Args:
-        incident: Raw incident dictionary (parsed from JSON ticket).
-
-    Returns:
-        A fully populated ResolutionReport.
+    Now uses LangGraph for state management and reasoning loops.
     """
-    # Extract incident ID
     incident_id = incident.get("incidentId") or incident.get("task_id") or incident.get("id", "unknown")
+    repo_url = incident.get("repository", "")
     
-    # Prioritize TARGET_REPO from config if it's set, otherwise use what's in the incident
-    incident_repo = incident.get("repository", "")
-    if TARGET_REPO and ("Rezinix-AI" in incident_repo or not incident_repo):
-        repo_url = f"https://github.com/{TARGET_REPO}.git"
-        logger.info(f"Target repo override from .env: {repo_url}")
-    else:
-        repo_url = incident_repo
-        
-    ticket_text = json.dumps(incident, indent=2)
+    # ── Step 0: Early exit for empty/useless incidents ──
+    raw_description = incident.get("description", "").strip()
+    raw_error_log = incident.get("error_log", "").strip()
+    raw_title = incident.get("title", "").strip()
 
-    logger.info(f"=== Starting agent workflow for {incident_id} ===")
+    if not raw_description and not raw_error_log and (not raw_title or raw_title.lower() in ["untitled", ""]):
+        logger.warning(f"Incident {incident_id} has no description or error log — skipping.")
+        update_incident_status(incident_id, "completed", "Insufficient data.")
+        return ResolutionReport(incident_id=incident_id)
+
+    # ── Build the Graph ──
+    workflow = StateGraph(AgentState)
     
-    # Initialize the report
-    report = ResolutionReport(
-        incident_id=incident_id,
-        ticket_text=ticket_text,
-        hypothesis="",
-        root_cause="",
-        files_analyzed=[],
-    )
+    workflow.add_node("parse", parse_node)
+    workflow.add_node("setup", setup_node)
 
-    # Initialize variables for cleanup
+    workflow.add_node("investigate", investigate_node)
+    workflow.add_node("fix", fix_node)
+    workflow.add_node("critic", critic_node)
+    workflow.add_node("verify", sandbox_node)
+    workflow.add_node("report", report_node)
+    
+    workflow.set_entry_point("parse")
+    workflow.add_edge("parse", "setup")
+    workflow.add_edge("setup", "investigate")
+    workflow.add_conditional_edges("investigate", route_after_investigate, {
+        "fix": "fix",
+        "retry": "investigate",
+        "give_up": "report"
+    })
+    workflow.add_edge("fix", "critic")
+    workflow.add_conditional_edges("critic", should_apply_fix, {
+        "verify": "verify",
+        "fix": "fix"
+    })
+    workflow.add_conditional_edges("verify", route_after_sandbox, {
+        "pass": "report",
+        "fail": "fix",
+        "env_error": "fix", # Agent uses env diagnosis to fix requirements/etc.
+        "give_up": "report"
+    })
+    workflow.add_edge("report", END)
+    
+    app = workflow.compile()
+    
+    # ── Execution ──
+    initial_state: AgentState = {
+        "incident": incident,
+        "incident_id": incident_id,
+        "repo_url": repo_url,
+        "repo_path": None,
+        "service_path": None,
+        "service": "unknown",
+        "language": "python",
+        "container_id": None,
+        "hypothesis": "",
+        "root_cause": "",
+        "target_file": "",
+        "file_content": "",
+        "proposed_fix": None,
+        "test_results": None,
+        "attempt_count": 0,
+        "messages": [],
+        "files_analyzed": [],
+        "history": "",
+        "confidence": 0.0,
+        "report": None,
+        "pr_url": None,
+        "status": "starting",
+        "similar_incidents": [],
+        "scratchpad": "",
+        # Sandbox v2 initial state
+        "sandbox_result": None,
+        "sandbox_attempts": 0,
+        "last_test_context": "",
+        "max_sandbox_attempts": 4,
+        "investigation_attempts": 0,
+        "changed_files": [] # Initialized as empty
+    }
+    
     container_id = None
-    repo_path = None
-    
     try:
-        # ── Step 0: Early exit for empty/useless incidents ──
-        raw_description = incident.get("description", "").strip()
-        raw_error_log = incident.get("error_log", "").strip()
-        raw_title = incident.get("title", "").strip()
-
-        # If both description and error log are empty, there's nothing to investigate
-        if not raw_description and not raw_error_log and (not raw_title or raw_title.lower() in ["untitled", "untitiled jira issue", "untitled jira issue", ""]):
-            logger.warning(f"Incident {incident_id} has no description or error log — marking as insufficient_data.")
-            push_thought(incident_id, "⚠️ This incident has no description or error log. Cannot investigate without more information.")
-            update_incident_status(incident_id, "completed", "Insufficient data: no description or error log provided. Please add details to the issue.")
-            return report
-
-        # ── Step 1: Parse the ticket ──
-        update_incident_status(incident_id, "parsing", "Parsing incident ticket")
-        from agent.prompts import PARSE_TICKET_PROMPT
-        parsed = parse_ticket(
-            incident_id=incident_id,
-            repository=incident.get("repository", repo_url),
-            issue_number=incident.get("issue_number", ""),
-            title=incident.get("title", ""),
-            description=incident.get("description", ""),
-            error_log=incident.get("error_log", ""),
-        )
-        service = parsed.get("service", "unknown")
-        error_message = parsed.get("error_message", "")
-        hypothesis = parsed.get("hypothesis", "")
-        affected_file = parsed.get("affected_file", "")
-
-        report.hypothesis = hypothesis
-        report.service = service
-        logger.info(f"Parsed ticket: service={service}, hypothesis={hypothesis[:100]}")
-        push_thought(incident_id, f"🔍 Parsed ticket. Identified service: '{service}'. Initial hypothesis: {hypothesis}")
-
-        # ── Step 2: Clone/locate the repository ──
-        update_incident_status(incident_id, "cloning", "Cloning repository")
-        from agent.repo_manager import clone_repo, create_branch, commit_fix, commit_all_changes, has_uncommitted_changes, push_branch, cleanup_repo
-
-        repo_path = clone_repo(repo_url or "https://github.com/Rezinix-AI/shopstack-platform.git")
-        service_path = _detect_service_root(repo_path, service)
-        
-        # ── Step 2.1: Start Docker Sandbox ──
-        service_type = "python" if service.lower().startswith("python") else "node"
-        image_name = "python:3.11-slim" if service_type == "python" else "node:20-alpine"
-        
-        update_incident_status(incident_id, "cloning", f"Starting Docker sandbox ({image_name})")
-        
-        # Mount the entire repo for maximum flexibility
-        volume_mounts = {repo_path: {'bind': '/app', 'mode': 'rw'}}
-        container_id = docker_runner.create_sandbox(image_name, volume_mounts)
-        
-        if not container_id:
-            logger.error("Failed to start Docker sandbox. Falling back to local execution.")
-            push_thought(incident_id, "⚠️ Docker sandbox failed to start — falling back to local execution mode.")
-        else:
-            logger.info(f"Docker sandbox started: {container_id[:12]}")
-            push_thought(incident_id, f"🐳 Docker sandbox ready ({image_name}). Repository volume-mounted at /app.")
-        
-        # Use issue_number for branch name if available (e.g. fix/42), else use incident_id
-        issue_number = incident.get("issue_number")
-        branch_name = f"fix/{issue_number}" if issue_number else f"fix/{incident_id.lower()}"
-        create_branch(repo_path, branch_name)
-        
-        # ── Step 2.5: Install Dependencies (Sandbox Robustness) ──
-        update_incident_status(incident_id, "cloning", "Installing dependencies in sandbox")
-        
-        # Map local service_path to container path
-        container_service_path = os.path.join("/app", os.path.relpath(service_path, repo_path)) if container_id else service_path
-        
-        install_dependencies(
-            service_path, 
-            service_type=service_type, 
-            container_id=container_id,
-            workdir=container_service_path
-        )
-
-        # ── Step 3: Investigate the codebase ──
-        update_incident_status(incident_id, "investigating", "Analyzing codebase for root cause")
-        root_cause, target_file, file_content = _investigate_codebase(
-            incident_id=incident_id,
-            service=service,
-            error_message=error_message,
-            hypothesis=hypothesis,
-            service_path=service_path,
-            affected_file=affected_file,
-            report=report,
-            container_id=container_id,
-            workdir=container_service_path
-        )
-        report.root_cause = root_cause
-        push_thought(incident_id, f"🧠 Root cause identified: {root_cause[:200]}. Target file: {target_file}")
-
-        # ── Step 4: Generate and apply fix (with retry loop) ──
-        fix = None
-        test_results = None
-        previous_attempts_history = ""
-        any_fix_applied = False
-
-        for attempt in range(1, MAX_RETRIES + 2):
-            report.retry_count = attempt
-
-            if attempt == 1:
-                update_incident_status(incident_id, "fixing", f"Generating fix (attempt {attempt})")
-                fix = generate_fix(
-                    incident_id=incident_id,
-                    root_cause=root_cause,
-                    file_path=target_file,
-                    file_content=file_content,
-                    error_log=error_message,
-                )
-            else:
-                update_incident_status(incident_id, "retrying", f"Revising fix based on test failure (attempt {attempt})")
-                fix = generate_retry_fix(
-                    file_path=target_file,
-                    previous_attempts=previous_attempts_history,
-                    test_output=test_results.output[:3000] if test_results else "",
-                )
-                file_content = read_file(target_file)
-
-            report.fix = fix
-            logger.info(f"Fix attempt {attempt}: {fix.explanation}")
-            push_thought(incident_id, f"🔧 Fix attempt {attempt}: {fix.explanation}")
-            previous_attempts_history += f"Attempt {attempt}:\nFile: {target_file}\nExplanation: {fix.explanation}\nOriginal: {fix.original_snippet}\nNew: {fix.new_snippet}\n"
-
-            applied = apply_fix(repo_path, fix)
-            if not applied and not fix.no_fix_needed:
-                logger.error(f"Failed to apply fix on attempt {attempt}")
-                continue
-
-            any_fix_applied = True
-            if fix.no_fix_needed:
-                logger.info("Fix generation stated no fix needed. Stopping retries.")
-                break
-
-            update_incident_status(incident_id, "fix_applied", "Fix applied, running tests")
-
-            # Run tests (pass container_id if available)
-            test_results = run_tests(service_path, service_type=service_type, container_id=container_id, workdir=container_service_path)
-            report.test_results = test_results
-            previous_attempts_history += f"Test Output:\n{test_results.output[:1000]}\n" + "-" * 40 + "\n"
-
-            env_error_keywords = ["WinError 2", "ENOENT", "command not found", "MODULE_NOT_FOUND"]
-            if any(kw in test_results.output for kw in env_error_keywords):
-                logger.warning("Environment error detected — skipping retries.")
-                fix.no_fix_needed = True
-                fix.explanation = f"Skipped: environment error ({test_results.output[:120]})"
-                report.env_error_detected = True
-                break
-
-            if test_results.passed:
-                logger.info(f"Tests PASSED on attempt {attempt}!")
-                update_incident_status(incident_id, "tests_passed", "All tests passed")
-                push_thought(incident_id, f"✅ Tests passed on attempt {attempt}! The fix works correctly.")
-                break
-            else:
-                logger.warning(f"Tests FAILED on attempt {attempt}: {test_results.output[:200]}")
-                push_thought(incident_id, f"❌ Tests failed on attempt {attempt}. Output snippet: {test_results.output[:150]}. Revising the fix...")
-                if attempt > MAX_RETRIES:
-                    update_incident_status(incident_id, "partial_fix", f"Fix applied but tests still failing after {MAX_RETRIES + 1} attempts")
-
-        # ── Step 5: Calculate confidence score ──
-        if report.env_error_detected:
-            report.confidence_score = max(50, 80 - (report.retry_count - 1) * 10)
-        elif test_results and test_results.passed:
-            report.confidence_score = max(60, 95 - (report.retry_count - 1) * 15)
-        elif test_results:
-            report.confidence_score = max(10, 40 - (report.retry_count - 1) * 10)
-        else:
-            report.confidence_score = 10
-
-        # ── Step 6: Generate report markdown ──
-        update_incident_status(incident_id, "reporting", "Generating resolution report")
-        report.report_markdown = _generate_report_markdown(report)
-
-        # ── Step 7: Create PR ──
-        # IMPORTANT: Only create a PR if we actually patched a source file.
-        # Git side-effects (e.g. npm install creating package-lock.json) must NOT trigger a PR.
-        # If no_fix_needed=True, the agent determined this is not a code-fixable problem — skip PR.
-        has_file_patch = any_fix_applied and report.fix and not report.fix.no_fix_needed
-
-        if has_file_patch:
-            logger.info("A source-code fix was applied. Proceeding with PR creation.")
-            try:
-                pr_creator = PRCreator()
-                commit_fix(repo_path, target_file, incident_id)
-                push_branch(repo_path, branch_name)
-                # Prefer the real GitHub issue number (e.g., #42) for the PR title
-                # so GitHub auto-links and closes the issue on merge.
-                github_issue_number = incident.get("issue_number")
-                if github_issue_number:
-                    pr_title = f"Fix #{github_issue_number}: {incident.get('title', incident_id)}"
-                    closes_ref = f"\n\n---\nCloses #{github_issue_number}"
-                else:
-                    # Fallback for manually simulated incidents (no real GitHub issue)
-                    pr_title = f"Fix: {incident.get('title', incident_id)}"
-                    closes_ref = ""
-
-                pr_url = pr_creator.create_pull_request(
-                    repo_name=repo_url.split("github.com/")[-1].replace(".git", ""),
-                    branch_name=branch_name,
-                    title=pr_title,
-                    body=report.report_markdown + closes_ref
-                )
-                report.pr_url = pr_url
-                push_thought(incident_id, f"🚀 PR created: {pr_url}")
-                update_incident_status(incident_id, "pr_created", f"PR created: {pr_url}")
-                update_incident_status(incident_id, "completed", "Incident resolved successfully with PR.")
-            except Exception as e:
-                logger.error(f"Failed to create PR: {e}")
-                update_incident_status(incident_id, "pr_failed", f"PR creation failed: {e}")
-        elif report.fix and report.fix.no_fix_needed:
-            # Agent correctly determined this cannot be fixed with a code change
-            reason = report.fix.explanation or "Not a code-fixable issue"
-            logger.info(f"Skipping PR — agent determined no code fix needed: {reason}")
-            push_thought(incident_id, f"⚠️ No PR created: {reason}")
-            update_incident_status(incident_id, "completed", f"No code fix required: {reason}")
-        else:
-            logger.info("No code changes detected — skipping PR creation.")
-            update_incident_status(incident_id, "completed", "No code changes were produced.")
-
-        return report
-
+        final_state = app.invoke(initial_state)
+        container_id = final_state.get("container_id")
+        return final_state.get("report") or ResolutionReport(incident_id=incident_id)
     except Exception as e:
         logger.error(f"Agent workflow failed for {incident_id}: {e}")
         update_incident_status(incident_id, "failed", f"Agent workflow failed: {e}")
-        report.root_cause = f"Agent failed: {e}"
-        report.confidence_score = 0
-        return report
-
+        return ResolutionReport(incident_id=incident_id, root_cause=f"Error: {e}")
     finally:
-        # ── Cleanup ──
         if container_id:
             try:
                 docker_runner.destroy_sandbox(container_id)
                 logger.info(f"Cleaned up Docker sandbox: {container_id[:12]}")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup Docker sandbox: {e}")
+            except Exception as cleanup_err:
+                logger.warning(f"Failed to cleanup Docker sandbox: {cleanup_err}")
+
+
+# --- LangGraph Nodes ---
+
+def parse_node(state: AgentState) -> dict:
+    """Parses the incident ticket to extract structured context."""
+    incident = state["incident"]
+    incident_id = state["incident_id"]
+    repo_url = state["repo_url"]
+    
+    update_incident_status(incident_id, "parsing", "Parsing incident ticket")
+    
+    parsed = parse_ticket(
+        incident_id=incident_id,
+        repository=incident.get("repository", repo_url),
+        issue_number=incident.get("issue_number", ""),
+        title=incident.get("title", ""),
+        description=incident.get("description", ""),
+        error_log=incident.get("error_log", ""),
+    )
+    
+    from .memory_manager import EpisodicMemory
+    memory = EpisodicMemory(repo_url=repo_url)
+    similar = memory.retrieve(query=parsed.get("error_message") or parsed.get("hypothesis") or "")
+    
+    push_thought(incident_id, f"Parsing ticket for {incident_id}. Service: {parsed.get('service')}. Detected {len(similar)} similar past incidents in episodic memory.")
+    logger.info(f"[HYPOTHESIS] {incident_id}: {parsed.get('hypothesis')}")
+    return {
+        "service": parsed.get("service", "unknown"),
+        "language": "python" if parsed.get("service", "").lower().startswith("python") else "node",
+        "hypothesis": parsed.get("hypothesis", ""),
+        "similar_incidents": similar,
+        "status": "investigating",
+        "messages": [f"Parsed ticket. Initial hypothesis: {parsed.get('hypothesis')}. Found {len(similar)} similar past incidents."]
+    }
+
+def setup_node(state: AgentState) -> dict:
+    """Clones the repo and starts the Docker sandbox."""
+    incident_id = state["incident_id"]
+    repo_url = state["repo_url"]
+    language = state["language"]
+    
+    update_incident_status(incident_id, "cloning", "Setting up environment")
+    push_thought(incident_id, f"Initiating setup for {incident_id}. Cloning {repo_url} and provisioning a {language} Docker sandbox.")
+    
+    from agent.repo_manager import clone_repo, create_branch
+    
+    repo_path = clone_repo(repo_url)
+    create_branch(repo_path, f"fix/{incident_id.lower()}")
+    service_path = _detect_service_root(repo_path, state["service"])
+    
+    # We no longer start a permanent container. 
+    # Ephemeral sandboxes are managed by SandboxManager in the verify/sandbox node.
+    
+    return {
+        "repo_path": repo_path,
+        "service_path": service_path,
+        "container_id": None,
+        "messages": [f"Environment setup complete. Repository cloned to {repo_path}. Ephemeral sandboxes will be used for execution."]
+    }
+
+def _get_pinned_context(state: AgentState) -> str:
+    incident = state["incident"]
+    return f"""Incident ID: {state['incident_id']}
+Title: {incident.get('title')}
+Description: {incident.get('description')}
+Error: {state.get('error_message') or incident.get('error_log')}"""
+
+def investigate_node(state: AgentState) -> dict:
+    """Investigates the codebase to find the root cause."""
+    incident_id = state["incident_id"]
+    service_path = state["service_path"]
+    
+    update_incident_status(incident_id, "investigating", "Analyzing codebase")
+    
+    root_cause, target_file, file_content, files_analyzed = _investigate_codebase(
+        incident_id=incident_id,
+        service=state.get("service", "unknown"),
+        error_message=state["incident"].get("error_log", ""),
+        hypothesis=state["hypothesis"],
+        service_path=service_path,
+        affected_file=state["incident"].get("affected_file", ""),
+        container_id=state["container_id"],
+        workdir=state["service_path"]
+    )
+
+    # Hierarchical Summarization: Store summary if file is large
+    if len(file_content) > 3000:
+        push_thought(incident_id, f"File {target_file} is large ({len(file_content)} chars). Generating hierarchical summary for context window optimization.")
+        from .tools import summarize_file
+        try:
+            summary = summarize_file(target_file, file_content)
+            state["history"] += f"\nSummary of {target_file}: {summary}"
+        except:
+            pass
+
+    push_thought(incident_id, f"Investigating {target_file}. Running root cause analysis using context pinning and current scratchpad.")
+
+    from .fix_generator import analyze_code
+    pinned = _get_pinned_context(state)
+    analysis = analyze_code(
+        incident_id=incident_id,
+        service=state.get("service_type", "unknown"),
+        error_message=state.get("error_message") or "",
+        hypothesis=state["hypothesis"],
+        file_path=target_file,
+        file_content=file_content,
+        pinned_context=pinned,
+        scratchpad=state.get("scratchpad", "")
+    )
+    
+    push_thought(incident_id, f"[ROOT CAUSE ANALYSIS] Confirmed root cause in {target_file}: {analysis.get('root_cause_explanation') or root_cause}")
+
+    lang = detect_language(state["incident"], files_analyzed)
+
+    return {
+        "root_cause": analysis.get("root_cause_explanation") or root_cause,
+        "target_file": target_file,
+        "file_content": file_content,
+        "files_analyzed": files_analyzed,
+        "language": lang,
+        "investigation_attempts": state.get("investigation_attempts", 0) + 1,
+        "messages": [f"Root cause analyzed: {root_cause[:100]}... in {target_file}. Sandbox language detected: {lang}"]
+    }
+
+def fix_node(state: AgentState) -> dict:
+    """Generates and applies a fix."""
+    incident_id = state["incident_id"]
+    
+    if state["attempt_count"] == 0:
+        push_thought(incident_id, f"No previous attempts. Generating minimal fix for root cause: {state['root_cause'][:60]}...")
+        update_incident_status(incident_id, "fixing", "Generating fix")
+        pinned = _get_pinned_context(state)
+        fix = generate_fix(
+            incident_id=incident_id,
+            root_cause=state["root_cause"],
+            file_path=state["target_file"],
+            file_content=state["file_content"],
+            error_log=state["incident"].get("error_log", ""),
+            pinned_context=pinned,
+            scratchpad=state.get("scratchpad", "")
+        )
+    else:
+        update_incident_status(incident_id, "retrying", f"Revising fix (attempt {state['attempt_count'] + 1})")
+        # Logic to call LLM again with failure feedback
+        fix = generate_retry_fix(
+            file_path=state["target_file"],
+            previous_attempts=str(state.get("messages", [])),
+            test_output=json.dumps(state.get("sandbox_result")),
+            patching_error=state.get("last_patch_error", ""),
+        )
+
+    logger.info(f"[FIX EXPLANATION] {incident_id}: {fix.explanation}")
+
+    # Safety Check: Never patch incident metadata files
+    if "incident" in fix.file_path.lower() or fix.file_path.startswith("incidents/"):
+        error_msg = f"SAFETY BLOCK: Agent attempted to patch an incident metadata file: {fix.file_path}. Only code files allowed."
+        return {
+            "proposed_fix": fix,
+            "attempt_count": state["attempt_count"] + 1,
+            "status": "failed",
+            "last_patch_error": error_msg,
+            "messages": state.get("messages", []) + [error_msg]
+        }
+
+    # Use the new surgical patcher
+    patch_res = patch_file_tool(
+        file_path=os.path.join(state["repo_path"], fix.file_path),
+        new_code=fix.new_code,
+        symbol_name=fix.symbol_name,
+        symbol_type=fix.symbol_type,
+        start_line=fix.start_line,
+        end_line=fix.end_line,
+        expected_old_code=fix.expected_old_code
+    )
+    
+    applied = patch_res["success"]
+    changed_files = state.get("changed_files", [])
+    if applied and fix.file_path not in changed_files:
+        changed_files.append(fix.file_path)
+    
+    error_msg = patch_res.get("error", "")
+    push_thought(incident_id, f"Fix strategy generated. Type: {patch_res.get('strategy_used', 'unknown')}. {'Applied to codebase surgicaly.' if applied else f'Patch failed: {error_msg}'}")
+    
+    return {
+        "proposed_fix": fix,
+        "attempt_count": state["attempt_count"] + 1,
+        "status": "verifying" if applied else "failed",
+        "changed_files": changed_files,
+        "last_patch_error": error_msg,
+        "messages": state.get("messages", []) + [f"Applied fix: {fix.explanation}" if applied else f"Patch failed: {error_msg}"]
+    }
+
+def _detect_affected_tests(repo_path: str, target_file: str, service_type: str) -> List[str]:
+    """Identifies tests that are likely relevant to the changed file."""
+    basename = os.path.basename(target_file).split('.')[0]
+    relevant_tests = []
+    search_patterns = [f"test_{basename}.py", f"{basename}_test.py", f"{basename}.test.js", f"{basename}.spec.js"]
+    
+    for root, dirs, files in os.walk(repo_path):
+        for file in files:
+            if file in search_patterns:
+                relevant_tests.append(os.path.relpath(os.path.join(root, file), repo_path))
+    return relevant_tests
+
+def report_node(state: AgentState) -> dict:
+    """Generates the final report and creates a PR."""
+    incident_id = state["incident_id"]
+    repo_path = state["repo_path"]
+    target_file = state["target_file"]
+    branch_name = f"fix/{incident_id.lower()}" # Simplified for now
+    
+    update_incident_status(incident_id, "reporting", "Generating resolution report")
+    push_thought(incident_id, f"Incident investigation complete. Status: {state['status']}. Compiling final resolution report and PR documentation.")
+    
+    # Minimal report generation for now
+    # Calculate Senior-Level Confidence Score
+    # Formula: (tests_passed + fix_minimal + root_cause_precise - retries)
+    base_confidence = 0
+    if state["status"] == "passed": base_confidence += 40
+    if state.get("proposed_fix") and not state.get("last_patch_error"): base_confidence += 30
+    import re
+    if bool(re.search(r'[:#]\d+', state["root_cause"])): base_confidence += 30
+    base_confidence -= min(30, state["attempt_count"] * 10)
+    
+    report = state.get("report") or ResolutionReport(
+        incident_id=incident_id,
+        ticket_text=json.dumps(state["incident"]),
+        hypothesis=state["hypothesis"],
+        root_cause=state["root_cause"],
+        files_analyzed=state.get("files_analyzed", []),
+        service=state.get("service", "unknown"),
+        fix=state["proposed_fix"],
+        test_results=state["test_results"],
+        confidence_score=max(0, min(100, base_confidence))
+    )
+    
+    report.report_markdown = _generate_report_markdown(report)
+    
+    # Create PR logic
+    # Antigravity Protocol: PR ONLY if tests passed
+    should_pr = (state["status"] == "passed")
+    if state["proposed_fix"] and state["proposed_fix"].no_fix_needed:
+        should_pr = False
+        push_thought(incident_id, "No fix was required. Skipping PR.")
+    
+    if not should_pr and state["status"] == "failed":
+        push_thought(incident_id, "CRITICAL: Sandbox verification FAILED. Blocking PR creation to prevent broken code merge.")
+        # But we still generate a report
+
+    if should_pr:
+        # Store successful trace in episodic memory
+        if state["status"] == "passed":
+            from .memory_manager import EpisodicMemory
+            memory = EpisodicMemory(repo_url=state["repo_url"])
+            memory.store(state["incident_id"], {
+                "root_cause": state["root_cause"],
+                "fix": state["proposed_fix"].explanation if state["proposed_fix"] else "N/A",
+                "test_output": state["test_results"].output if state["test_results"] else ""
+            })
+
+        try:
+            from agent.repo_manager import commit_fix, push_branch
+            pr_creator = PRCreator()
+            commit_fix(repo_path, target_file, incident_id)
+            push_branch(repo_path, branch_name)
+            
+            pr_url = pr_creator.create_pull_request(
+                repo_name=state["repo_url"].split("github.com/")[-1].replace(".git", ""),
+                branch_name=branch_name,
+                title=f"Fix: {incident_id}",
+                body=report.report_markdown
+            )
+            update_incident_status(incident_id, "pr_created", f"PR created: {pr_url}")
+            update_incident_status(incident_id, "completed", "Incident resolved.")
+            return {"pr_url": pr_url, "status": "completed"}
+        except Exception as e:
+            logger.error(f"Failed to create PR: {e}")
+            update_incident_status(incident_id, "pr_failed", f"PR creation failed: {e}")
+    
+    update_incident_status(incident_id, "completed", "No PR created.")
+    return {"status": "completed"}
+
+def critic_node(state: AgentState) -> dict:
+    """
+    Acts as an adversary to the planner/fixer.
+    Reviews the proposed fix and provides feedback before it is applied.
+    """
+    from .fix_generator import call_llm
+    incident = state["incident"]
+    fix = state["proposed_fix"]
+    
+    if not fix or fix.no_fix_needed or "incident" in fix.file_path.lower():
+        push_thought(state["incident_id"], f"Critic REJECTED: Proposed fix targets non-code file or is empty: {fix.file_path if fix else 'None'}")
+        return {
+            "status": "failed",
+            "messages": ["Critic rejected: Fix must target source code, not incident metadata."]
+        }
+
+    prompt = f"""
+    You are a Senior Code Reviewer. Review the following proposed fix for an incident.
+    Incident: {incident.get('title')}
+    Reported Error: {incident.get('error_log')}
+    Proposed Fix: {fix.explanation}
+    Original Code: {fix.original_snippet}
+    New Code: {fix.new_code}
+    
+    Explain if this fix is correct, minimal, and doesn't introduce regressions.
+    If you approve, start your response with 'APPROVED'.
+    If you object, explain why and what needs to change.
+    """
+    
+    try:
+        feedback = call_llm(prompt)
+        push_thought(state["incident_id"], f"Adversarial Review (Critic): {feedback[:100]}...")
+        approved = feedback.strip().upper().startswith("APPROVED")
+    except:
+        approved = True # Fallback to approval if LLM fails
+        feedback = "Approved (fallback)"
+
+    return {
+        "status": "verifying" if approved else "revising",
+        "messages": [f"Critic feedback: {'Approved' if approved else 'Objected'}. Details: {feedback[:100]}..."]
+    }
+
+def should_apply_fix(state: AgentState) -> str:
+    """Conditional edge after critic_node."""
+    if state["status"] == "verifying":
+        return "verify"
+    return "fix"
+
+def route_after_investigate(state: AgentState) -> str:
+    """Ensures a high-quality root cause (file + line + mechanism) was found before fixing."""
+    incident_id = state["incident_id"]
+    root_cause = state.get("root_cause", "").lower()
+    files = state.get("files_analyzed", [])
+    attempts = state.get("investigation_attempts", 0)
+
+    # 1. Check for actual source code files
+    SOURCE_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rb", ".cpp", ".c", ".h", ".rs"}
+    source_files = [
+        f for f in files 
+        if any(f.lower().endswith(ext) for ext in SOURCE_EXTENSIONS)
+        and "incident" not in f.lower()
+    ]
+    
+    # 2. Check for precision (e.g., "file.js:42" or "line 15")
+    import re
+    has_precision = bool(re.search(r'[:#]\d+', root_cause)) or bool(re.search(r'line \d+', root_cause))
+    
+    # 3. Decision Logic:
+    # If we have a precise root cause in a source file, we're ready to fix.
+    if has_precision and source_files and "no fix needed" not in root_cause:
+        return "fix"
         
-        # We don't necessarily want to cleanup the repo if we need it for logs,
-        # but the original code had it here.
-        # if repo_path:
-        #     cleanup_repo(repo_path)
+    # If we've already done 3 loops and haven't found a surgical cause, 
+    # we either take our best guess ('fix') or give up.
+    if attempts >= 3:
+        if "no fix needed" in root_cause or "could not find" in root_cause:
+             push_thought(incident_id, "Investigation Gate: Max attempts reached without finding root cause. Ending workflow.")
+             return "give_up" # You might need to add this to LangGraph edges
+        return "fix"
+
+    # If we read no source code, we definitely need a retry.
+    if not source_files:
+        push_thought(incident_id, "Investigation Gate: No actual source code was analyzed. Forcing retry.")
+        return "retry"
+        
+    # If we read code but it was the wrong file (vague cause), retry.
+    if not has_precision:
+        push_thought(incident_id, "Investigation Gate: Root cause is vague (no line reference). Forcing deeper investigation.")
+        return "retry"
+        
+    return "fix"

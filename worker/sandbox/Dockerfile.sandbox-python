@@ -1,0 +1,43 @@
+# Dockerfile.sandbox-python
+#
+# Pre-bake all testing/quality tooling so dep install inside the container
+# is fast (only project deps change, not pytest/mypy/etc).
+#
+# Build once:  docker build -f Dockerfile.sandbox-python -t agent-sandbox-python:latest .
+# Then set IMAGE_REGISTRY["python"] = "agent-sandbox-python:latest"
+
+FROM python:3.11-slim
+
+# Security: don't run as root
+RUN useradd -m -u 1000 -s /bin/bash sandbox
+
+# System deps (keep minimal)
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pre-install all testing/quality tooling
+# These never change between runs — cached in this layer
+RUN pip install --no-cache-dir \
+    pytest==7.4.* \
+    pytest-json-report==1.5.* \
+    pytest-cov==4.1.* \
+    pytest-xdist==3.3.*  \
+    pyflakes==3.1.* \
+    mypy==1.6.* \
+    black==23.9.* \
+    isort==5.12.* \
+    anthropic==0.23.*
+
+# Working directory (will be volume-mounted by agent)
+RUN mkdir -p /workspace && chown sandbox:sandbox /workspace
+WORKDIR /workspace
+
+# Non-root user
+USER sandbox
+
+# Default: keep container alive (agent sends exec commands)
+CMD ["tail", "-f", "/dev/null"]

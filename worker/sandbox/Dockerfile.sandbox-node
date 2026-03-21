@@ -1,0 +1,24 @@
+# Dockerfile.sandbox-node
+#
+# Build: docker build -f Dockerfile.sandbox-node -t agent-sandbox-node:latest .
+
+FROM node:20-alpine
+
+RUN adduser -D -u 1000 sandbox
+
+RUN apk add --no-cache git python3 make g++
+
+# Pre-install global test/quality tools
+RUN npm install -g --silent \
+    jest@29 \
+    eslint@8 \
+    typescript@5 \
+    ts-node@10 \
+    ts-jest@29
+
+RUN mkdir -p /workspace && chown sandbox:sandbox /workspace
+WORKDIR /workspace
+
+USER sandbox
+
+CMD ["tail", "-f", "/dev/null"]

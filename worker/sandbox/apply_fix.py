@@ -38,19 +38,21 @@ def apply_fix(repo_path: str, fix: Fix) -> bool:
         logger.warning(f"original_snippet is empty — cannot apply patch.")
         return False
 
-    # Resolve the file path
+    # Resolve the file path — try multiple bases since the LLM may return a path
+    # relative to the service directory (e.g. app/routes/orders.py) or the repo root
+    # (e.g. python-service/app/routes/orders.py) or an absolute path.
     full_path = fix.file_path
     if not os.path.isabs(full_path):
-        full_path = os.path.join(repo_path, fix.file_path)
+        # First: try relative to repo_path
+        candidate = os.path.join(repo_path, fix.file_path.lstrip("/"))
+        if os.path.exists(candidate):
+            full_path = candidate
+        else:
+            full_path = candidate  # will fail below with a clear error
 
     if not os.path.exists(full_path):
-        # Try stripping leading path separator
-        alt = os.path.join(repo_path, fix.file_path.lstrip("/"))
-        if os.path.exists(alt):
-            full_path = alt
-        else:
-            logger.error(f"File not found: {full_path}")
-            return False
+        logger.error(f"File not found: {full_path}")
+        return False
 
     try:
         with open(full_path, 'r', encoding='utf-8') as f:
@@ -59,8 +61,8 @@ def apply_fix(repo_path: str, fix: Fix) -> bool:
         # ── Tier 1: Exact Match ──
         if fix.original_snippet in content:
             logger.info(f"Tier 1 (exact) match for {fix.file_path}")
-            new_content = content.replace(fix.original_snippet, fix.new_snippet, 1)
-            return _write_and_verify(full_path, new_content, fix.new_snippet)
+            new_content = content.replace(fix.original_snippet, fix.new_code, 1)
+            return _write_and_verify(full_path, new_content, fix.new_code)
 
         # ── Tier 2: Normalized Whitespace Match ──
         # Collapse all whitespace in both the file and the snippet, then locate
@@ -69,9 +71,9 @@ def apply_fix(repo_path: str, fix: Fix) -> bool:
         if norm_snippet in norm_content:
             logger.info(f"Tier 2 (normalized whitespace) match for {fix.file_path}")
             # Re-apply using line-aware replacement
-            result = _replace_normalized(content, fix.original_snippet, fix.new_snippet)
+            result = _replace_normalized(content, fix.original_snippet, fix.new_code)
             if result:
-                return _write_and_verify(full_path, result, fix.new_snippet)
+                return _write_and_verify(full_path, result, fix.new_code)
 
         # ── Tier 3: Fuzzy Line-by-Line Match ──
         snippet_lines = _strip_lines(fix.original_snippet)
@@ -82,8 +84,8 @@ def apply_fix(repo_path: str, fix: Fix) -> bool:
             logger.info(f"Tier 3 (fuzzy line) match ratio={best_ratio:.2f} at lines {best_start}-{best_end}")
             prefix = '\n'.join(content_lines[:best_start])
             suffix = '\n'.join(content_lines[best_end:])
-            new_content = (prefix + '\n' if prefix else '') + fix.new_snippet + ('\n' + suffix if suffix else '')
-            return _write_and_verify(full_path, new_content, fix.new_snippet)
+            new_content = (prefix + '\n' if prefix else '') + fix.new_code + ('\n' + suffix if suffix else '')
+            return _write_and_verify(full_path, new_content, fix.new_code)
 
         # ── Tier 4: Anchor on most-unique line ──
         key_line = _most_unique_line(snippet_lines, content_lines)

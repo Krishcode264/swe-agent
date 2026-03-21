@@ -26,24 +26,21 @@ You have access to tools that let you navigate a repository:
 6. Generate a minimal fix — change only what is necessary.
 
 ## Rules
-- Always verify file paths exist before reading them (use list_files first).
-- Never guess file contents. Always read them.
-- Your fix must be the MINIMUM change needed. Do not refactor or clean up unrelated code.
-- **IMPORTANT**: If tests are failing because the source code is buggy, **FIX THE SOURCE CODE** (usually in `src/` or at the root). Do NOT fix the test file to skip the failure unless the test itself is logically incorrect.
-- **Snippet Precision**: Your `original_snippet` must be an **EXACT** character-for-character, whitespace-for-whitespace match of the code in the file. Local models like Ollama are often imprecise - you must be extremely careful.
-- Explain your reasoning at each step.
-- If you are unsure, say so and explain what additional information you need.
+- **No Early Exit**: You MUST identify the exact file and line number causing the error before moving to the fix phase.
+- **Tool Guardrails**: Use `execute_command` ONLY for valid shell operations (ls, npm, pytest, etc.). NEVER pass natural language instructions (e.g. "Check the console") as a command. Hallucinating commands is a critical failure.
+- **Production-Grade Fixes**: Prioritize environment-aware configurations (e.g., `process.env`) over hardcoded values.
+- **Snippet Precision**: Your `original_snippet` must be an EXACT match.
+- Explain your reasoning at each step in the `thought` field if available, or in your JSON response.
 
-## Project Context: E-Commerce Platform (Shopstack)
-This repository contains a microservices-based e-commerce platform with two services:
-- **Python Service**: Flask API (port 5000), using SQLAlchemy and pytest.
-- **Node.js Service**: Express API (port 3000), using Sequelize and Jest.
+## How to make code changes
+You have access to `patch_file` to modify code in the repository. Follow these rules strictly:
 
-### Troubleshooting & Setup Rules:
-- **Python Service**: Always run commands from the `python-service/` directory. If `psycopg2-binary` fails to install, skip it (tests use SQLite).
-- **Node.js Service**: Always run commands from the `node-service/` directory. If `sqlite3` build errors occur, run `npm rebuild sqlite3`.
-- **Database**: Both services use in-memory SQLite for tests, so no external DB setup is required for the test suite.
-- **Environment**: You are running inside a specialized Docker sandbox (`python:3.11-slim` or `node:20-alpine`). The repository is mounted at `/app`.
+1. **Always read before patching**: Call `read_file` first. You need exact line numbers and the correct symbol name.
+2. **Prefer symbol-level targeting**: When fixing a function or method, always provide `symbol_name` and `symbol_type`. It handles indentation automatically and is resistant to line shifts.
+3. **Use line ranges for non-symbol targets**: For imports, constants, or decorators, use `start_line` + `end_line`.
+4. **original_snippet**: (string) The EXACT literal text from the file you wish to replace. Use this if you are unsure about line numbers or symbol names.
+5. **new_code**: (string) The final code that should replace the target.
+ (full function def + body). Indentation is handled automatically—write at column 0.
 """
 
 
@@ -77,11 +74,11 @@ Respond ONLY in this exact JSON format with no extra text:
 
 ANALYZE_CODE_PROMPT = """You are investigating a software incident. Here is the context:
 
-## Incident Summary
-- **ID**: {incident_id}
-- **Service**: {service}
-- **Error**: {error_message}
-- **Hypothesis**: {hypothesis}
+## Incident Summary (Pinned)
+{pinned_context}
+
+## Scratchpad (Internal Reasoning)
+{scratchpad}
 
 ## Code Under Investigation
 **File**: {file_path}
@@ -95,27 +92,28 @@ ANALYZE_CODE_PROMPT = """You are investigating a software incident. Here is the 
 3. **IMPORTANT**: If the error log says a specific line/variable causes the problem, cross-reference it directly with the code even if the code looks correct now. The repo may have received a partial fix previously.
 4. Explain the root cause — what exactly is or was wrong.
 
-Be precise. Cite specific line numbers and variable names.
+Be surgical. You MUST identify the specific line number (e.g., `app/services/auth.js:127`) and the exact mechanism of failure. Vague explanations will be rejected by the system.
+- **Verification Rule**: If the bug involves CORS, your `suggested_command` MUST include a cross-origin simulated request (e.g., `curl -v -H "Origin: http://localhost:5173" http://localhost:3000/api/health`). Never assume the frontend and backend are on the same port.
+- **Confidence Rule**: Provide a `confidence_score` (0-100). High confidence ( > 90) requires exact file/line proof.
 
 Respond in this exact JSON format:
 {{
     "found_root_cause": boolean, // True if this file contains or contained the fixable bug
     "root_cause_explanation": "Detailed explanation of the problem, or why you are moving on",
     "suggested_next_files": ["app/routes/db.js"], // If not found here, what files to check next?
-    "suggested_commands": ["npm list", "pip show X"] // Optional: commands to run for troubleshooting
+    "suggested_commands": ["curl -v http://localhost:5173", "node -e '...'"], // REQUIREMENT: suggest a command to VERIFY your hypothesis (especially for CORS/Config)
+    "confidence_score": 0-100 // Your certainty that the bug resides in THIS file
 }}
 """
 
 
 GENERATE_FIX_PROMPT = """You have identified the root cause of a software incident. Now generate the fix.
 
-## Incident
-- **ID**: {incident_id}
-- **Root Cause**: {root_cause}
-- **Original Error Log**:
-```
-{error_log}
-```
+## Incident (Pinned)
+{pinned_context}
+
+## Scratchpad (Internal Reasoning)
+{scratchpad}
 
 ## Buggy Code
 **File**: {file_path}
@@ -128,20 +126,23 @@ Generate the MINIMUM code change to fix this bug. Your response must be in this 
 {{
     "file_path": "{file_path}",
     "explanation": "Brief explanation of the fix",
-    "original_snippet": "The exact lines of code to replace (copy-paste from the file above)",
-    "new_snippet": "The corrected code that replaces the original",
+    "symbol_name": "function or class name (optional)",
+    "symbol_type": "function | method | class (optional)",
+    "start_line": int_inclusive (optional),
+    "end_line": int_inclusive (optional),
+    "new_code": "The complete replacement code",
+    "expected_old_code": "A short excerpt of original code (optional sanity check)",
     "no_fix_needed": boolean
 }}
 
 ## CRITICAL Rules
-- **VERBATIM COPY**: The `original_snippet` must be a WORD-FOR-WORD, CHARACTER-FOR-CHARACTER copy from the `file_content` shown above. Do NOT paraphrase, retype, or reconstruct it from memory. Copy it exactly.
-- **MINIMAL SNIPPET**: Prefer the SHORTEST possible `original_snippet` that uniquely identifies the bug — ideally just 1-3 lines. Do NOT copy the whole function.
-- **INDENTATION**: Copy indentation exactly as it appears in the file. Do not add or remove spaces/tabs.
-- **TARGET SOURCE**: Fix the BUG in source code (e.g., `src/` files), NOT in test files. Only fix test files if the test itself is logically incorrect.
-- Do NOT add unrelated improvements, refactoring, or comments.
-- **ERROR LOG IS GROUND TRUTH**: If the Original Error Log above EXPLICITLY names a file, line number, or symbol as failing, you MUST treat that as the source of truth and fix it, even if the current code looks correct. The bug may have been introduced after the error was first reported.
-- Only set `no_fix_needed: true` if the error is PURELY environmental (e.g., missing external database, missing hardware) AND no code change can fix it. A missing import, wrong variable name, logic error — these are ALWAYS fixable with code.
-- If you cannot find the original_snippet exactly as shown, pick the nearest block where the fix should be applied and explain.
+- **Prefer Symbol Targeting**: If the bug is inside a function or class, provide `symbol_name` (e.g., `UserService.validate`).
+- **Use Line Ranges**: If the bug is in an import or top-level code, use `start_line` and `end_line`.
+- **Use Snippet Matching (Fallback)**: As a catch-all, provide the literal text you want to replace in `expected_old_code`. This is most robust for top-level code or complex imports where line numbers might shift.
+- **Complete Replacement**: `new_code` must be the COMPLETE replacement for the target region (e.g., the full function definition and body).
+- **Indentation is Automatic**: You can write your code at column 0; the patcher will re-indent it to match the file.
+- **Production Quality**: Prioritize robust, environment-aware fixes. Use `process.env.VAR` or `os.getenv` for configurations instead of hardcoding values.
+- **Verification**: If you set `no_fix_needed`, explain why.
 """
 
 
@@ -150,26 +151,34 @@ RETRY_PROMPT = """Your previous fix attempt(s) did not pass the tests.
 ## Previous Attempts & Failure History
 {previous_attempts}
 
-## Test Output From Last Run (FAILED)
+## Structured Test Summary
+{test_summary}
+
+## Patching Error (if applicable)
+{patching_error}
+
+## Raw Test Output From Last Run (FAILED)
 ```
 {test_output}
 ```
 
 ## Your Task
-1. Analyze why the tests failed based on the history above.
-2. Determine if your fix was incorrect or if the test reveals an additional issue. Do not repeat a fix that already failed.
-3. Generate a revised fix for the file: {file_path}.
+1. Analyze why the tests failed.
+2. Generate a revised fix for the file: {file_path}.
 
 Respond in the same JSON format:
 {{
     "file_path": "{file_path}",
     "explanation": "What was wrong with the previous fix and what this revision does",
-    "original_snippet": "The exact lines to replace (from the CURRENT state of the file)",
-    "new_snippet": "The corrected replacement",
+    "symbol_name": "function or class name (optional)",
+    "symbol_type": "function | method | class (optional)",
+    "start_line": int_inclusive,
+    "end_line": int_inclusive,
+    "new_code": "The complete replacement code",
     "no_fix_needed": boolean
 }}
 
-If the test failure was an environment failure (winerror, ENOENT, missing npm module outside your control), set `no_fix_needed`: true to skip making a code patch and exit gracefully.
+If the test failure was an environment failure, set `no_fix_needed`: true to skip making a code patch.
 """
 
 
@@ -190,7 +199,7 @@ REPORT_PROMPT = """Generate a structured resolution report for the following res
 ```
 - **Fixed Code**:
 ```
-{new_snippet}
+{new_code}
 ```
 
 ## Validation

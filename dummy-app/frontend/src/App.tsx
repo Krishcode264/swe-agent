@@ -110,7 +110,7 @@ function App() {
 
   const simulateDiscountIncident = async () => {
     const incident = {
-      "id": "INC-12345678",
+      "id": "INC-126575764",
       "incidentId": "INC-006",
       "title": "Discount code applied twice during checkout resulting in incorrect order totals",
       "severity": "P1 - Critical",
@@ -154,7 +154,7 @@ function App() {
   const simulateCORSIncident = async () => {
     const incident = {
       "id": "INC-10002",
-      "incidentId": "INC-1022222",
+      "incidentId": "INC-10455643652",
       "title": "CORS error blocking all frontend API requests",
       "severity": "P1 - Critical",
       "service": "node-service",

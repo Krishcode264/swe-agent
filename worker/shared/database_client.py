@@ -34,10 +34,9 @@ def push_thought(incident_id: str, thought: str) -> None:
         thought: A natural language description of what the agent is thinking/doing.
     """
     try:
+        logger.info(f"[REASONING HUB] {incident_id}: {thought}")
         url = f"{BACKEND_API_URL}/incidents/{incident_id}/thoughts"
-        response = requests.post(url, json={"thought": thought}, timeout=5)
-        response.raise_for_status()
-        logger.debug(f"Thought logged for {incident_id}: {thought[:60]}...")
+        requests.post(url, json={"thought": thought}, timeout=5)
     except Exception as e:
         # Never raise — agent thinking logs are non-critical
         logger.warning(f"Could not log agent thought for {incident_id}: {e}")

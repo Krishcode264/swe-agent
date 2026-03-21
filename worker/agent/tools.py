@@ -38,10 +38,9 @@ def list_files(directory: str, max_depth: int = 3) -> List[str]:
             dirs.clear()  # Don't descend further
             continue
 
-        # Skip common non-essential directories
         dirs[:] = [
             d for d in dirs
-            if d not in ("node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", "dist", "build")
+            if d not in ("node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", "dist", "build", "incidents", ".github")
         ]
 
         for filename in files:
@@ -54,22 +53,18 @@ def list_files(directory: str, max_depth: int = 3) -> List[str]:
 
 def read_file(file_path: str) -> str:
     """
-    Read the full contents of a file.
-
-    Args:
-        file_path: Absolute path to the file.
-
-    Returns:
-        File contents as a string, or an error message if the file cannot be read.
+    Read the full contents of a file with line numbers.
     """
     if not os.path.isfile(file_path):
         return f"Error: '{file_path}' does not exist or is not a file."
 
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-        logger.info(f"read_file('{file_path}'): {len(content)} chars")
-        return content
+            lines = f.readlines()
+            
+        numbered = "".join(f"{i+1:4d}  {line}" for i, line in enumerate(lines))
+        logger.info(f"read_file('{file_path}'): read {len(lines)} lines")
+        return numbered
     except Exception as e:
         return f"Error reading '{file_path}': {e}"
 
@@ -122,7 +117,7 @@ def search_in_directory(directory: str, pattern: str, extensions: List[str] = No
         # Skip non-essential directories
         dirs[:] = [
             d for d in dirs
-            if d not in ("node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build")
+            if d not in ("node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build", "incidents", ".github")
         ]
 
         for filename in files:
@@ -166,16 +161,7 @@ def write_file(file_path: str, content: str) -> str:
 
 def read_file_lines(file_path: str, start_line: int, end_line: int) -> str:
     """
-    Read a specific range of lines from a file.
-    Useful for reading large files without loading everything into context.
-
-    Args:
-        file_path: Absolute path to the file.
-        start_line: First line to read (1-indexed, inclusive).
-        end_line: Last line to read (1-indexed, inclusive).
-
-    Returns:
-        The requested lines with line numbers prefixed.
+    Read a specific range of lines from a file with line numbers prefixed.
     """
     if not os.path.isfile(file_path):
         return f"Error: '{file_path}' does not exist or is not a file."
@@ -188,9 +174,7 @@ def read_file_lines(file_path: str, start_line: int, end_line: int) -> str:
         end_idx = min(len(lines), end_line)
         selected = lines[start_idx:end_idx]
 
-        result = ""
-        for i, line in enumerate(selected, start=start_idx + 1):
-            result += f"{i}: {line}"
+        result = "".join(f"{i+1:4d}  {line}" for i, line in enumerate(selected, start=start_idx + 1))
 
         logger.info(f"read_file_lines('{file_path}', {start_line}-{end_line}): {len(selected)} lines")
         return result
@@ -216,6 +200,21 @@ def execute_command(command: str, cwd: str, container_id: Optional[str] = None) 
     
     logger.info(f"execute_command('{command}') (container={container_id})")
     
+    # Safeguard against LLM hallucinations (e.g., "Check the browser console")
+    cmd_clean = command.strip()
+    first_word = cmd_clean.split()[0].lower() if cmd_clean else ""
+    forbidden_prefixes = ("check", "verify", "ensure", "i will", "now i", "wait", "first", "please")
+    valid_prefixes = ("npm", "node", "python", "python3", "pytest", "pip", "pip3", "grep", "find", "ls", "cat", "curl", "wget", "ps", "sh", "bash", "git", "rm", "mv", "cp", "mkdir")
+    
+    is_valid = (
+        first_word in valid_prefixes or 
+        first_word.startswith(("./", "/"))
+    ) and not any(cmd_clean.lower().startswith(p) for p in forbidden_prefixes)
+
+    if not is_valid:
+        logger.warning(f"Rejected invalid command hallucination: {command}")
+        return f"Error: '{command}' is not a valid shell command. Use only supported tools (npm, pytest, python, etc.). Do not provide conversational instructions."
+
     if container_id:
         # Resolve workdir relative to container
         # Note: In our current setup, repo is mounted at /app
@@ -246,3 +245,58 @@ def execute_command(command: str, cwd: str, container_id: Optional[str] = None) 
         return f"Error: Command timed out after 30s (likely a blocking network call): {command}"
     except Exception as e:
         return f"Error executing command: {e}"
+
+
+def grep_ast(file_path: str, symbol_name: str) -> str:
+    """
+    AST-aware search for a symbol (function or class) in a Python file.
+    Returns the source code of the symbol and its line range.
+    
+    This fulfills the 'AST-aware search' requirement by using the Python `ast` module.
+    """
+    import ast
+    if not file_path.endswith(".py"):
+        return f"Error: grep_ast currently only supports Python files. Use search_in_file for others."
+    
+    if not os.path.isfile(file_path):
+        return f"Error: File '{file_path}' not found."
+        
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            source = f.read()
+            
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+                if node.name == symbol_name:
+                    start_line = node.lineno
+                    # handle possible missing end_lineno in older versions, though 3.8+ should have it
+                    end_line = getattr(node, "end_lineno", node.lineno + 1)
+                    
+                    # Extract the source for this node
+                    lines = source.splitlines()
+                    symbol_source = "\n".join(lines[start_line-1:end_line])
+                    
+                    return f"Found '{symbol_name}' at {os.path.basename(file_path)}:{start_line}-{end_line}:\n\n{symbol_source}"
+                    
+        return f"Symbol '{symbol_name}' not found in {os.path.basename(file_path)}."
+    except Exception as e:
+        return f"Error parsing {file_path}: {e}"
+
+
+def write_scratchpad(content: str) -> str:
+    """
+    Writes to the agent's internal scratchpad to keep track of hypotheses and findings.
+    This helps manage context by externalizing the agent's working memory.
+    """
+    return f"Scratchpad updated: {content}"
+
+
+def summarize_file(file_path: str, content: str) -> str:
+    """
+    Generates a concise summary of a file's purpose and key functions.
+    Used to keep the context window clean by replacing raw code with summaries.
+    """
+    from .fix_generator import call_llm
+    prompt = f"Summarize the following code file ({file_path}) concisely, focusing on its main purpose and key functions:\n\n{content}"
+    return call_llm(prompt)
